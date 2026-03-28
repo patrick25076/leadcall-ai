@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+/* Agent message rich text */
+.agent-message strong {
+  color: #e5e7eb;
+  font-weight: 600;
+}
+
+.agent-message em {
+  color: #9ca3af;
+  font-style: italic;
+}
+
+.agent-message a {
+  color: #34d399;
+  text-decoration: underline;
+}
+
+/* Smooth transitions for details/summary */
+details > summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
+details > summary::before {
+  content: "▸ ";
+  font-size: 9px;
+  color: #6b7280;
+}
+
+details[open] > summary::before {
+  content: "▾ ";
+}

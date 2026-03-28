@@ -1,0 +1,10 @@
+google-adk>=1.0.0
+fastapi[standard]>=0.115.0
+uvicorn>=0.34.0
+requests>=2.32.0
+beautifulsoup4>=4.12.0
+orq-ai-sdk>=4.0.0
+httpx>=0.28.0
+python-dotenv>=1.0.0
+sse-starlette>=2.0.0
+twilio>=9.0.0
