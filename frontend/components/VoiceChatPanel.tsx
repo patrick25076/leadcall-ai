@@ -14,7 +14,9 @@ type Transcript = {
 };
 
 const WS_BASE = typeof window !== "undefined"
-  ? `ws://${window.location.hostname}:8000`
+  ? (process.env.NEXT_PUBLIC_API_URL
+      ? process.env.NEXT_PUBLIC_API_URL.replace(/^http/, "ws")
+      : `ws://${window.location.hostname}:8000`)
   : "ws://localhost:8000";
 
 export function VoiceChatPanel({ sessionId, onClose, onConfigSaved }: VoiceChatProps) {
