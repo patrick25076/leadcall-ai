@@ -200,7 +200,7 @@ READINESS CHECK:
 - Any missing information that would make the call fail?
 
 If score < 7, provide a REVISED pitch with improvements — IN THE SAME LANGUAGE.
-Set ready_to_call = true only if score >= 7 AND phone number exists AND no critical missing info.
+Set ready_to_call = true if score >= 7 AND phone number exists. Missing contact_person is NOT a blocker — the agent can use the company name instead.
 
 Save using save_judged_pitches as a JSON array with:
 lead_name, contact_person, score, relevance_score, length_score, cta_score,
@@ -324,15 +324,23 @@ Then present a SUMMARY to the user showing:
 Ask: "Does this look good? Should I create the voice agents now?"
 
 **STEP 4 — CREATE AGENTS (if confirmed):**
-If the user confirms, transfer to call_manager to create the actual ElevenLabs agents
-using the saved voice config.
+If the user confirms, create the ElevenLabs voice agents yourself using create_elevenlabs_agent.
+For EACH ready lead (ready_to_call = true), create an agent:
+- agent_name: "SDR for [Lead Name]"
+- first_message: Use the caller_name and greet the contact_person (or company name). Write IN THE DETECTED LANGUAGE.
+- system_prompt: Include the pitch_script, call_style, objective, closing_cta, pricing. Write IN THE DETECTED LANGUAGE.
+- Pass: lead_name, lead_company, lead_industry, contact_person, your_company, your_services, pitch_script, call_objective, language
+- Set language to the detected language_code
+
+After creating agents, report what was created. If the user says "call them", use make_outbound_call.
 
 IMPORTANT RULES:
 - NEVER create agents without first gathering the caller_name and objective
 - If pricing was not found on the website, you MUST ask the user
 - Be friendly and efficient — guide the user through the setup quickly
 - Speak in the same language as the detected business language when possible
-- After saving config, confirm what was saved so the user feels in control""",
+- After saving config, confirm what was saved so the user feels in control
+- If the user asks to create agents or call, DO IT — don't tell them to ask another agent""",
     tools=[
         assess_voice_readiness,
         configure_voice_agent,
@@ -340,6 +348,9 @@ IMPORTANT RULES:
         get_pipeline_state,
         save_preferences,
         get_preferences,
+        create_elevenlabs_agent,
+        make_outbound_call,
+        get_call_status,
     ],
 )
 
@@ -409,16 +420,16 @@ ROUTING RULES:
 - When the user says "set up voice agents", "configure calls", "prepare agents",
   "are we ready to call?", or anything about voice/call readiness → transfer to voice_config_agent
   (this agent checks what's missing, asks the user, and saves the config)
-- When the user says "make the calls", "call them", "start calling" and agents are already
-  created → transfer to call_manager
-- When the user says "create agents" or "set up agents" AFTER voice config is done → transfer to call_manager
+- When the user says "create agents", "make the calls", "call them", "start calling",
+  "create voice agents", or anything about creating ElevenLabs agents or making outbound calls
+  → transfer to voice_config_agent (it can both configure AND create agents + make calls)
 - For general questions about the pipeline status, answer directly using get_pipeline_state
 
-IMPORTANT FLOW:
-After the pipeline finishes → voice_config_agent (assess & configure) → call_manager (create agents & call)
-The voice_config_agent MUST run before call_manager to ensure we have all needed info.
-
-Always be concise and action-oriented. Show progress clearly.""",
+IMPORTANT:
+- The voice_config_agent can create ElevenLabs agents AND make calls — no need for a separate step.
+- If voice config is already saved and user wants to create agents, still transfer to voice_config_agent.
+- NEVER tell the user to "ask another agent" — handle everything through routing.
+- Be concise and action-oriented. Show progress clearly.""",
     sub_agents=[analysis_pipeline, voice_config_agent, preferences_agent, call_manager],
     tools=[get_pipeline_state],
 )

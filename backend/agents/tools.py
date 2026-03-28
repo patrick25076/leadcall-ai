@@ -717,6 +717,31 @@ def save_judged_pitches(judged_json: str) -> dict:
         judged = json.loads(judged_json)
         if isinstance(judged, dict):
             judged = [judged]
+
+        # Normalize field names — Gemini sometimes uses camelCase or no underscores
+        for j in judged:
+            # Fix ready_to_call variants
+            if "readytocall" in j and "ready_to_call" not in j:
+                j["ready_to_call"] = j.pop("readytocall")
+            if "readyToCall" in j and "ready_to_call" not in j:
+                j["ready_to_call"] = j.pop("readyToCall")
+            # Fix missing_info variants
+            if "missinginfo" in j and "missing_info" not in j:
+                j["missing_info"] = j.pop("missinginfo")
+            if "missingInfo" in j and "missing_info" not in j:
+                j["missing_info"] = j.pop("missingInfo")
+            # Auto-set ready_to_call if score >= 7 and has phone
+            score = j.get("score", 0)
+            phone = j.get("phone_number")
+            if score >= 7 and phone and "ready_to_call" not in j:
+                j["ready_to_call"] = True
+            # If score >= 7 and phone exists but was marked False only due to missing contact_person, override
+            if score >= 7 and phone and not j.get("ready_to_call", False):
+                missing = j.get("missing_info", [])
+                only_contact_missing = all("contact" in m.lower() for m in missing) if missing else True
+                if only_contact_missing:
+                    j["ready_to_call"] = True
+
         pipeline_state["judged_pitches"] = judged
         ready_count = sum(1 for j in judged if j.get("ready_to_call", False))
 
@@ -1326,8 +1351,11 @@ def assess_voice_readiness() -> dict:
         checklist["business_analysis"] = False
         missing.append("business_analysis — pipeline hasn't run yet, no website analyzed")
 
-    # Judged pitches
-    ready_pitches = [p for p in judged if p.get("ready_to_call")]
+    # Judged pitches — check multiple field name variants
+    ready_pitches = [p for p in judged if p.get("ready_to_call") or p.get("readytocall") or p.get("readyToCall")]
+    # Fallback: if no ready pitches but score >= 7 and phone exists, consider them ready
+    if not ready_pitches and judged:
+        ready_pitches = [p for p in judged if (p.get("score", 0) >= 7) and p.get("phone_number")]
     checklist["has_judged_pitches"] = len(judged) > 0
     checklist["has_ready_pitches"] = len(ready_pitches) > 0
     checklist["ready_pitch_count"] = len(ready_pitches)
@@ -1468,7 +1496,8 @@ def get_voice_agent_config() -> dict:
 
     ready_leads_detail = []
     for p in judged:
-        if p.get("ready_to_call"):
+        is_ready = p.get("ready_to_call") or p.get("readytocall") or p.get("readyToCall") or (p.get("score", 0) >= 7 and p.get("phone_number"))
+        if is_ready:
             # Find matching pitch script
             pitch_script = p.get("revised_pitch") or p.get("pitch", "")
             ready_leads_detail.append({
