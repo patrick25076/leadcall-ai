@@ -34,7 +34,7 @@ from .tools import (
 # ─── 1. Website Analyzer Agent ──────────────────────────────────────────────
 website_analyzer = Agent(
     name="website_analyzer",
-    model="gemini-3.0-flash",
+    model="gemini-2.0-flash",
     description="Crawls a business website (multiple pages) to extract services, ICP, location, pricing, and industry info.",
     instruction="""You are a business intelligence analyst. When given a URL:
 
@@ -75,7 +75,7 @@ industries. The more industries you identify, the better leads we'll find.""",
 # ─── 2. Lead Finder Agent ───────────────────────────────────────────────────
 lead_finder = Agent(
     name="lead_finder",
-    model="gemini-3.0-flash",
+    model="gemini-2.0-flash",
     description="Finds potential business leads using Brave Search and Google Maps, with creative industry research and location awareness.",
     instruction="""You are an elite B2B lead generation specialist. Based on the business analysis: {business_analysis}
 
@@ -127,7 +127,7 @@ Be CREATIVE — the best SDR finds leads nobody else thinks of.""",
 # ─── 2b. Lead Scorer Agent ──────────────────────────────────────────────────
 lead_scorer = Agent(
     name="lead_scorer",
-    model="gemini-3.0-flash",
+    model="gemini-2.0-flash",
     description="Scores and ranks leads based on location, industry, online presence, and estimated value.",
     instruction="""You are a lead scoring analyst. Using the business analysis context: {business_analysis}
 
@@ -146,7 +146,7 @@ business size signals, and estimated lifetime value.""",
 # ─── 3. Pitch Generator Agent ───────────────────────────────────────────────
 pitch_generator = Agent(
     name="pitch_generator",
-    model="gemini-3.0-flash",
+    model="gemini-2.0-flash",
     description="Creates personalized sales pitches for each lead, using lead names and business context, in the detected language.",
     instruction="""You are an expert SDR copywriter. Using:
 - Business analysis: {business_analysis}
@@ -176,7 +176,7 @@ call_to_action, estimated_duration_seconds, personalization_notes, language""",
 # ─── 4. Pitch Judge Agent ───────────────────────────────────────────────────
 pitch_judge = Agent(
     name="pitch_judge",
-    model="gemini-3.0-flash",
+    model="gemini-2.0-flash",
     description="Evaluates pitch quality, checks readiness, and identifies missing information.",
     instruction="""You are a sales pitch critic and readiness checker. Review:
 - Business analysis: {business_analysis}
@@ -213,7 +213,7 @@ missing_info (array), phone_number, language""",
 # ─── 5. Call Manager Agent ──────────────────────────────────────────────────
 call_manager = Agent(
     name="call_manager",
-    model="gemini-3.0-flash",
+    model="gemini-2.0-flash",
     description="Creates personalized ElevenLabs voice agents with dynamic variables and manages outbound calls.",
     instruction="""You manage outbound sales calls using ElevenLabs voice agents with per-lead personalization.
 
@@ -259,7 +259,7 @@ When asked about results:
 # ─── 6. Preferences Agent ───────────────────────────────────────────────────
 preferences_agent = Agent(
     name="preferences_agent",
-    model="gemini-3.0-flash",
+    model="gemini-2.0-flash",
     description="Configures user preferences: pricing, calendar, call style, language, and campaign settings.",
     instruction="""You are a configuration assistant. You help the user set up their SDR campaign preferences.
 
@@ -284,7 +284,7 @@ proactively ask for it.""",
 # ─── 7. Voice Config Agent ─────────────────────────────────────────────────
 voice_config_agent = Agent(
     name="voice_config_agent",
-    model="gemini-3.0-flash",
+    model="gemini-2.0-flash",
     description="Assesses readiness for voice calls, gathers missing info from the user, and configures ElevenLabs voice agents. Use this BEFORE creating agents or making calls.",
     instruction="""You are a voice campaign configuration specialist. Your job is to make sure we have
 EVERYTHING needed to create effective ElevenLabs voice agents before any calls are made.
@@ -389,7 +389,7 @@ analysis_pipeline = SequentialAgent(
 # ─── Root Orchestrator ───────────────────────────────────────────────────────
 root_agent = Agent(
     name="leadcall_orchestrator",
-    model="gemini-3.0-flash",
+    model="gemini-2.0-flash",
     description="Main orchestrator for LeadCall AI SDR platform.",
     instruction="""You are LeadCall AI, an intelligent SDR (Sales Development Representative) platform.
 
