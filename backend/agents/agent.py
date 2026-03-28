@@ -166,6 +166,9 @@ For EACH of the top scored leads (grade A and B), create a personalized pitch:
 
 WRITE THE ENTIRE PITCH IN THE DETECTED LANGUAGE.
 
+CRITICAL: You MUST call the save_pitch tool with your results. Do NOT just output JSON —
+you MUST use the save_pitch tool function. The pipeline will fail if you don't save.
+
 Save all pitches using save_pitch as a JSON array with objects containing:
 lead_name, contact_person, pitch_script (IN THE DETECTED LANGUAGE), key_value_proposition,
 call_to_action, estimated_duration_seconds, personalization_notes, language""",
@@ -201,6 +204,9 @@ READINESS CHECK:
 
 If score < 7, provide a REVISED pitch with improvements — IN THE SAME LANGUAGE.
 Set ready_to_call = true if score >= 7 AND phone number exists. Missing contact_person is NOT a blocker — the agent can use the company name instead.
+
+CRITICAL: You MUST call the save_judged_pitches tool with your results. Do NOT just output JSON —
+you MUST use the save_judged_pitches tool function. The pipeline will fail if you don't save.
 
 Save using save_judged_pitches as a JSON array with:
 lead_name, contact_person, score, relevance_score, length_score, cta_score,
@@ -340,7 +346,10 @@ IMPORTANT RULES:
 - Be friendly and efficient — guide the user through the setup quickly
 - Speak in the same language as the detected business language when possible
 - After saving config, confirm what was saved so the user feels in control
-- If the user asks to create agents or call, DO IT — don't tell them to ask another agent""",
+- If the user asks to create agents or call, DO IT — don't tell them to ask another agent
+- If judged_pitches are empty but regular pitches exist, proceed anyway — assess_voice_readiness will auto-populate them
+- NEVER tell the user to go back to another agent or that you need the orchestrator to run something first
+- If assess_voice_readiness says ready, CREATE the agents immediately""",
     tools=[
         assess_voice_readiness,
         configure_voice_agent,

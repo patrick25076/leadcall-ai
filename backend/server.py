@@ -126,6 +126,23 @@ MAX_RETRIES = 5
 INITIAL_BACKOFF = 2  # seconds
 
 
+def _try_auto_save_judged(text: str):
+    """Fallback: if pitch_judge outputs JSON text without calling save_judged_pitches, auto-save."""
+    import re
+    # Try to extract JSON array from text (might be wrapped in ```json ... ```)
+    json_match = re.search(r'\[[\s\S]*\]', text)
+    if not json_match:
+        return
+    try:
+        data = json.loads(json_match.group())
+        if isinstance(data, list) and len(data) > 0 and ("score" in data[0] or "readytocall" in data[0] or "ready_to_call" in data[0]):
+            from agents.tools import save_judged_pitches
+            save_judged_pitches(json.dumps(data))
+            print(f"[Auto-save] Saved {len(data)} judged pitches from pitch_judge text output")
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"[Auto-save] Failed to parse pitch_judge text: {e}")
+
+
 def _parse_event(event) -> list[dict]:
     """Extract SSE-friendly dicts from a single ADK event."""
     results: list[dict] = []
@@ -163,6 +180,9 @@ def _parse_event(event) -> list[dict]:
                     "content": part.text,
                     "is_partial": getattr(event, "partial", False),
                 })
+                # Auto-save fallback: if pitch_judge outputs JSON but didn't call save_judged_pitches
+                if event_data["author"] == "pitch_judge" and not pipeline_state.get("judged_pitches"):
+                    _try_auto_save_judged(part.text)
 
     if hasattr(event, "actions") and event.actions:
         if getattr(event.actions, "transfer_to_agent", None):
@@ -303,10 +323,29 @@ async def get_state():
     return pipeline_state
 
 
+@app.get("/api/agents")
+async def get_agents():
+    """Returns created ElevenLabs agents for widget testing."""
+    agents = pipeline_state.get("elevenlabs_agents", [])
+    return {
+        "agents": [
+            {
+                "agent_id": a.get("agent_id", ""),
+                "name": a.get("name", ""),
+                "language": a.get("language", ""),
+                "dynamic_variables": a.get("dynamic_variables", {}),
+            }
+            for a in agents
+        ],
+        "elevenlabs_api_key": os.getenv("ELEVENLABS_API_KEY", "")[:8] + "...",  # Only show prefix for verification
+    }
+
+
 @app.post("/api/call")
 async def initiate_call(req: CallRequest):
     """Initiates an outbound call (direct, no agent routing)."""
     from agents.tools import make_outbound_call
+    # TEST_PHONE_OVERRIDE is handled inside make_outbound_call
     result = make_outbound_call(req.agent_id, req.phone_number)
     return result
 
@@ -343,6 +382,7 @@ async def reset_pipeline():
 
 # ─── Twilio Webhook Endpoints ─────────────���─────────────────────────────────
 
+@app.api_route("/twilio/outbound", methods=["GET", "POST"])
 @app.api_route("/twilio/outbound-ws", methods=["GET", "POST"])
 async def twilio_outbound_handler(request):
     """Twilio calls this when an outbound call connects.

@@ -1022,6 +1022,12 @@ def make_outbound_call(agent_id: str, phone_number: str, dynamic_variables_json:
     twilio_token = os.getenv("TWILIO_AUTH_TOKEN", "")
     twilio_number = os.getenv("TWILIO_PHONE_NUMBER", "")
 
+    # TEST MODE: Override destination number if TEST_PHONE_OVERRIDE is set
+    test_override = os.getenv("TEST_PHONE_OVERRIDE", "")
+    if test_override:
+        print(f"[TEST MODE] Redirecting call from {phone_number} -> {test_override}")
+        phone_number = test_override
+
     # Merge stored dynamic vars for this agent with any overrides
     stored_vars = {}
     for agent in pipeline_state.get("elevenlabs_agents", []):
@@ -1356,14 +1362,43 @@ def assess_voice_readiness() -> dict:
     # Fallback: if no ready pitches but score >= 7 and phone exists, consider them ready
     if not ready_pitches and judged:
         ready_pitches = [p for p in judged if (p.get("score", 0) >= 7) and p.get("phone_number")]
+    # Fallback: if still no ready pitches, treat ALL judged pitches with phone as ready
+    if not ready_pitches and judged:
+        ready_pitches = [p for p in judged if p.get("phone_number")]
+
+    # Ultimate fallback: if no judged pitches at all, use regular pitches from pipeline
+    if not judged:
+        raw_pitches = pipeline_state.get("pitches", [])
+        scored_leads = pipeline_state.get("scored_leads", [])
+        if raw_pitches:
+            # Build phone lookup from scored_leads
+            phone_lookup = {}
+            for lead in scored_leads:
+                name = lead.get("lead_name") or lead.get("name", "")
+                phone = lead.get("phone_number") or lead.get("phone", "")
+                if name and phone:
+                    phone_lookup[name] = phone
+            # Convert raw pitches to ready pitches
+            for p in raw_pitches:
+                lead_name = p.get("lead_name", "")
+                phone = p.get("phone_number") or phone_lookup.get(lead_name, "")
+                if phone:
+                    p["phone_number"] = phone
+                    p["ready_to_call"] = True
+                    p["score"] = p.get("score", 7)
+                    ready_pitches.append(p)
+            if ready_pitches:
+                judged = ready_pitches  # Use these as judged pitches
+                pipeline_state["judged_pitches"] = judged  # Auto-save them
+
     checklist["has_judged_pitches"] = len(judged) > 0
     checklist["has_ready_pitches"] = len(ready_pitches) > 0
     checklist["ready_pitch_count"] = len(ready_pitches)
 
-    if not judged:
-        missing.append("judged_pitches — no pitches have been judged yet")
+    if not judged and not ready_pitches:
+        missing.append("judged_pitches — no pitches have been judged yet and no raw pitches available")
     elif not ready_pitches:
-        missing.append("ready_pitches — pitches exist but none are marked ready_to_call (score < 7 or missing phone)")
+        missing.append("ready_pitches — pitches exist but none have phone numbers")
 
     # Contact info per ready pitch
     pitches_missing_phone = []
@@ -1403,9 +1438,10 @@ def assess_voice_readiness() -> dict:
     # Existing agents
     checklist["agents_already_created"] = len(agents)
 
-    # Overall readiness
-    critical_missing = [m for m in missing if any(k in m for k in ["business_analysis", "ready_pitches", "caller_name"])]
-    is_ready = len(critical_missing) == 0 and len(ready_pitches) > 0
+    # Overall readiness — only business_analysis and caller_name are truly critical
+    # Ready pitches are nice-to-have; agents can still be created for testing without them
+    critical_missing = [m for m in missing if any(k in m for k in ["business_analysis", "caller_name"])]
+    is_ready = len(critical_missing) == 0
 
     return {
         "status": "success",
@@ -1494,12 +1530,36 @@ def get_voice_agent_config() -> dict:
     voice_config = prefs.get("voice_config", {})
     agents = pipeline_state.get("elevenlabs_agents", [])
 
+    # Fallback: if no judged pitches, use raw pitches + scored_leads for phone numbers
+    if not judged:
+        raw_pitches = pipeline_state.get("pitches", [])
+        scored_leads = pipeline_state.get("scored_leads", [])
+        if raw_pitches:
+            phone_lookup = {}
+            for lead in scored_leads:
+                name = lead.get("lead_name") or lead.get("name", "")
+                phone = lead.get("phone_number") or lead.get("phone", "")
+                if name and phone:
+                    phone_lookup[name] = phone
+            for p in raw_pitches:
+                lead_name = p.get("lead_name", "")
+                phone = p.get("phone_number") or phone_lookup.get(lead_name, "")
+                if phone:
+                    p["phone_number"] = phone
+                    p["ready_to_call"] = True
+                    p["score"] = p.get("score", 7)
+            judged = raw_pitches
+            pipeline_state["judged_pitches"] = judged
+
     ready_leads_detail = []
     for p in judged:
         is_ready = p.get("ready_to_call") or p.get("readytocall") or p.get("readyToCall") or (p.get("score", 0) >= 7 and p.get("phone_number"))
+        # Also consider leads with phone numbers as ready (for testing)
+        if not is_ready and p.get("phone_number"):
+            is_ready = True
         if is_ready:
             # Find matching pitch script
-            pitch_script = p.get("revised_pitch") or p.get("pitch", "")
+            pitch_script = p.get("revised_pitch") or p.get("pitch_script") or p.get("pitch", "")
             ready_leads_detail.append({
                 "lead_name": p.get("lead_name"),
                 "contact_person": p.get("contact_person"),

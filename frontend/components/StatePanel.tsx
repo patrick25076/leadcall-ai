@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 type PipelineState = {
   business_analysis: Record<string, unknown> | null;
@@ -230,29 +230,7 @@ export function StatePanel({
             >
               <div className="space-y-2">
                 {state.elevenlabs_agents.map((agent, i) => (
-                  <div
-                    key={i}
-                    className="bg-[#0a0a10] rounded p-2.5 border border-purple-500/10"
-                  >
-                    <div className="text-[11px] text-purple-400 font-medium">
-                      {agent.name as string}
-                    </div>
-                    <div className="text-[9px] text-gray-600 mt-0.5 font-mono">
-                      ID: {agent.agent_id as string}
-                    </div>
-                    {agent.dynamic_variables ? (
-                      <div className="mt-1.5 flex flex-wrap gap-1">
-                        {Object.entries(agent.dynamic_variables as Record<string, string>)
-                          .filter(([, v]) => v && v.length > 0)
-                          .slice(0, 4)
-                          .map(([k, v]) => (
-                            <span key={k} className="text-[8px] px-1 py-0.5 bg-purple-500/10 text-purple-300/70 rounded">
-                              {`{{${k}}}`}: {String(v).slice(0, 20)}
-                            </span>
-                          ))}
-                      </div>
-                    ) : null}
-                  </div>
+                  <AgentCard key={i} agent={agent} />
                 ))}
               </div>
             </Section>
@@ -367,6 +345,111 @@ function ScoreBreakdown({ breakdown }: { breakdown: Record<string, string> }) {
           <span className="text-gray-500">{key}:</span> {val}
         </div>
       ))}
+    </div>
+  );
+}
+
+/* ─── Agent Card ─────────────────────────────────────────────────────────── */
+
+function AgentCard({ agent }: { agent: Record<string, unknown> }) {
+  const [calling, setCalling] = useState(false);
+  const [callResult, setCallResult] = useState<string | null>(null);
+  const [showWidget, setShowWidget] = useState(false);
+  const agentId = String(agent.agent_id || "");
+  const name = String(agent.name || "Agent");
+  const language = String(agent.language || "");
+  const vars = agent.dynamic_variables as Record<string, string> | undefined;
+
+  const handleTestCall = async () => {
+    setCalling(true);
+    setCallResult(null);
+    try {
+      const resp = await fetch("/api/call", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent_id: agentId, phone_number: "+40733980402" }),
+      });
+      const data = await resp.json();
+      setCallResult(data.status === "success" ? "Call initiated!" : `Error: ${data.error || "Unknown"}`);
+    } catch (e) {
+      setCallResult(`Error: ${String(e)}`);
+    } finally {
+      setCalling(false);
+    }
+  };
+
+  return (
+    <div className="bg-[#0a0a10] rounded p-2.5 border border-purple-500/10 space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-purple-400">{name}</span>
+        {language && (
+          <span className="text-[9px] px-1.5 py-0.5 bg-purple-500/10 text-purple-400/70 rounded">
+            {language}
+          </span>
+        )}
+      </div>
+      <div className="text-[9px] text-gray-600 font-mono truncate">
+        ID: {agentId}
+      </div>
+      {vars && (
+        <div className="flex flex-wrap gap-1 mt-1">
+          {vars.lead_name && (
+            <span className="text-[9px] px-1.5 py-0.5 bg-gray-700/30 text-gray-400 rounded">
+              {vars.lead_name}
+            </span>
+          )}
+          {vars.your_company && (
+            <span className="text-[9px] px-1.5 py-0.5 bg-cyan-500/10 text-cyan-400/70 rounded">
+              {vars.your_company}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Action Buttons */}
+      <div className="flex gap-2 mt-2">
+        <button
+          onClick={() => setShowWidget(!showWidget)}
+          className="text-[10px] px-2 py-1 bg-purple-500/20 text-purple-400 rounded hover:bg-purple-500/30 transition-colors"
+        >
+          {showWidget ? "Hide Widget" : "Test in Browser"}
+        </button>
+        <button
+          onClick={handleTestCall}
+          disabled={calling}
+          className="text-[10px] px-2 py-1 bg-emerald-500/20 text-emerald-400 rounded hover:bg-emerald-500/30 transition-colors disabled:opacity-50"
+        >
+          {calling ? "Calling..." : "Call Me"}
+        </button>
+        <a
+          href={`https://elevenlabs.io/app/conversational-ai/${agentId}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-[10px] px-2 py-1 bg-gray-700/30 text-gray-400 rounded hover:bg-gray-700/50 transition-colors"
+        >
+          Open in ElevenLabs
+        </a>
+      </div>
+
+      {callResult && (
+        <div className={`text-[9px] mt-1 ${callResult.startsWith("Error") ? "text-red-400" : "text-emerald-400"}`}>
+          {callResult}
+        </div>
+      )}
+
+      {/* ElevenLabs Embedded Widget */}
+      {showWidget && agentId && !agentId.startsWith("mock_") && (
+        <div className="mt-2 rounded overflow-hidden border border-purple-500/20">
+          <iframe
+            src={`https://elevenlabs.io/convai/embed/${agentId}`}
+            width="100%"
+            height="400"
+            style={{ border: "none", background: "#0a0a10" }}
+            allow="microphone"
+            title={`Test ${name}`}
+          />
+        </div>
+      )}
     </div>
   );
 }
