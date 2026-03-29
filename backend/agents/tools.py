@@ -1336,10 +1336,14 @@ def get_pipeline_state() -> dict:
         "leads_count": len(lead_data),
         "pitches": pipeline_state["pitches"],
         "pitches_count": len(pipeline_state["pitches"]),
+        "judged_pitches": pipeline_state["judged_pitches"],
         "judged_pitches_count": len(pipeline_state["judged_pitches"]),
         "preferences": pipeline_state["preferences"],
+        "elevenlabs_agents": pipeline_state["elevenlabs_agents"],
         "agents_created": len(pipeline_state["elevenlabs_agents"]),
+        "call_results": pipeline_state["call_results"],
         "calls_made": len(pipeline_state["call_results"]),
+        "campaign_id": pipeline_state.get("campaign_id"),
     }
 
 

@@ -201,8 +201,21 @@ class CallRequest(BaseModel):
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 async def get_or_create_session(session_id: Optional[str] = None) -> str:
-    """Creates an ADK session. Session IDs are always server-generated (no client control)."""
-    # Always generate a new session ID server-side (prevents session fixation)
+    """Get existing session or create a new one. Reuses sessions for conversation continuity."""
+    # Reuse existing session if valid (critical for chat context)
+    if session_id and session_id in _registered_sessions:
+        try:
+            existing = await runner.session_service.get_session(
+                app_name=runner.app_name,
+                user_id=USER_ID,
+                session_id=session_id,
+            )
+            if existing:
+                return session_id
+        except Exception:
+            pass  # Session expired or invalid, create new
+
+    # Create new session
     session = await runner.session_service.create_session(
         app_name=runner.app_name,
         user_id=USER_ID,
@@ -376,7 +389,8 @@ async def chat(req: ChatRequest):
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    session_id = await get_or_create_session()
+    # CRITICAL: Reuse session from client so agent has conversation context
+    session_id = await get_or_create_session(req.session_id)
 
     async def event_generator():
         yield {"event": "session", "data": json.dumps({"session_id": session_id})}
