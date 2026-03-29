@@ -13,39 +13,20 @@ os.environ["GOOGLE_MAPS_API_KEY"] = ""
 os.environ["ELEVENLABS_API_KEY"] = ""
 os.environ["TWILIO_ACCOUNT_SID"] = ""
 os.environ["TWILIO_AUTH_TOKEN"] = ""
+os.environ["ALLOWED_ORIGINS"] = "http://localhost:3000"
 
-import tempfile
 import pytest
 
 # Add backend to path so imports work
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Use a temp DB so tests don't conflict with running server
-_test_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-os.environ["GRAI_TEST_DB"] = _test_db.name
-_test_db.close()
-
-# Patch db.py to use the test DB
-import db
-db.DB_PATH = os.environ["GRAI_TEST_DB"]
-db._conn = None  # Reset connection so it picks up new path
-
 
 @pytest.fixture(autouse=True)
-def reset_db_and_rate_limiter():
-    """Reset DB connection and rate limiter between tests."""
-    import db as _db
-    _db._conn = None
-    # Reset rate limiter so tests don't hit 429
+def reset_rate_limiter():
+    """Reset rate limiter between tests so rapid requests don't hit 429."""
     from security import rate_limiter
     rate_limiter._buckets.clear()
     yield
-    _db._conn = None
-os.environ["BRAVE_API_KEY"] = ""
-os.environ["GOOGLE_MAPS_API_KEY"] = ""
-os.environ["ELEVENLABS_API_KEY"] = ""
-os.environ["TWILIO_ACCOUNT_SID"] = ""
-os.environ["TWILIO_AUTH_TOKEN"] = ""
 
 
 @pytest.fixture

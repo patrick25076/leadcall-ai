@@ -794,80 +794,96 @@ async def list_verified_numbers():
 
 @app.get("/api/admin/stats")
 async def admin_stats():
-    """Admin dashboard statistics. Returns pipeline, user, cost, and quality metrics."""
-    from db import get_conn
-    conn = get_conn()
-
-    # Campaign stats
-    campaigns = conn.execute("SELECT COUNT(*) as count FROM campaigns").fetchone()
-    active_campaigns = conn.execute("SELECT COUNT(*) as count FROM campaigns WHERE status='active'").fetchone()
-
-    # Lead stats
-    total_leads = conn.execute("SELECT COUNT(*) as count FROM leads").fetchone()
-    lead_grades = conn.execute(
-        "SELECT score_grade, COUNT(*) as count FROM leads WHERE score_grade IS NOT NULL GROUP BY score_grade"
-    ).fetchall()
-    avg_score = conn.execute("SELECT AVG(lead_score) as avg FROM leads WHERE lead_score > 0").fetchone()
-
-    # Pitch stats
-    total_pitches = conn.execute("SELECT COUNT(*) as count FROM pitches").fetchone()
-    ready_calls = conn.execute("SELECT COUNT(*) as count FROM pitches WHERE ready_to_call=1").fetchone()
-    ready_emails = conn.execute("SELECT COUNT(*) as count FROM pitches WHERE ready_to_email=1").fetchone()
-    avg_pitch_score = conn.execute("SELECT AVG(score) as avg FROM pitches WHERE score > 0").fetchone()
-
-    # Call stats
-    total_calls = conn.execute("SELECT COUNT(*) as count FROM calls").fetchone()
-    completed_calls = conn.execute("SELECT COUNT(*) as count FROM calls WHERE status='completed'").fetchone()
-
-    # Email stats
-    total_emails = conn.execute("SELECT COUNT(*) as count FROM email_outreach").fetchone()
-    sent_emails = conn.execute("SELECT COUNT(*) as count FROM email_outreach WHERE status='sent'").fetchone()
-
-    # Agent stats
-    total_agents = conn.execute("SELECT COUNT(*) as count FROM agents").fetchone()
-
-    # Recent activity (last 10 campaigns)
-    recent = conn.execute(
-        "SELECT id, website_url, business_name, status, created_at FROM campaigns ORDER BY id DESC LIMIT 10"
-    ).fetchall()
-
-    # GDPR audit log (last 20 entries)
-    audit = conn.execute(
-        "SELECT action, entity_type, entity_id, created_at FROM consent_log ORDER BY id DESC LIMIT 20"
-    ).fetchall()
-
-    # Cost estimate from observability tracker
+    """Admin dashboard statistics via Supabase."""
+    from db import get_db, is_configured
     from observability import get_tracker
+
+    if not is_configured():
+        tracker = get_tracker()
+        return {
+            "campaigns": {"total": 0, "active": 0},
+            "leads": {"total": 0, "avg_score": 0, "grades": {}},
+            "pitches": {"total": 0, "ready_to_call": 0, "ready_to_email": 0, "avg_score": 0},
+            "outreach": {"calls_total": 0, "calls_completed": 0, "emails_total": 0, "emails_sent": 0},
+            "agents": {"total": 0},
+            "recent_campaigns": [],
+            "audit_log": [],
+            "cost_estimate": tracker.get_summary() if tracker else None,
+            "note": "Database not configured — showing in-memory data only",
+        }
+
+    db = get_db()
+
+    # Counts via Supabase (select with count)
+    campaigns = db.table("campaigns").select("id", count="exact").execute()
+    active_campaigns = db.table("campaigns").select("id", count="exact").eq("status", "active").execute()
+    total_leads = db.table("leads").select("id", count="exact").execute()
+    total_pitches = db.table("pitches").select("id", count="exact").execute()
+    ready_calls = db.table("pitches").select("id", count="exact").eq("ready_to_call", True).execute()
+    ready_emails = db.table("pitches").select("id", count="exact").eq("ready_to_email", True).execute()
+    total_calls = db.table("calls").select("id", count="exact").execute()
+    completed_calls = db.table("calls").select("id", count="exact").eq("status", "completed").execute()
+    total_emails = db.table("email_outreach").select("id", count="exact").execute()
+    sent_emails = db.table("email_outreach").select("id", count="exact").eq("status", "sent").execute()
+    total_agents = db.table("agents").select("id", count="exact").execute()
+
+    # Lead grades
+    leads_data = db.table("leads").select("score_grade, lead_score").not_.is_("score_grade", "null").execute()
+    grades: dict[str, int] = {}
+    scores: list[float] = []
+    for r in (leads_data.data or []):
+        g = r.get("score_grade", "")
+        if g:
+            grades[g] = grades.get(g, 0) + 1
+        s = r.get("lead_score", 0)
+        if s and s > 0:
+            scores.append(s)
+
+    # Pitch scores
+    pitch_data = db.table("pitches").select("score").gt("score", 0).execute()
+    pitch_scores = [r["score"] for r in (pitch_data.data or []) if r.get("score")]
+
+    # Recent campaigns
+    recent = db.table("campaigns").select(
+        "id, website_url, business_name, status, created_at"
+    ).order("id", desc=True).limit(10).execute()
+
+    # Audit log
+    audit = db.table("consent_log").select(
+        "action, entity_type, entity_id, created_at"
+    ).order("id", desc=True).limit(20).execute()
+
+    # Cost tracker
     tracker = get_tracker()
     cost_summary = tracker.get_summary() if tracker else None
 
     return {
         "campaigns": {
-            "total": campaigns["count"],
-            "active": active_campaigns["count"],
+            "total": campaigns.count or 0,
+            "active": active_campaigns.count or 0,
         },
         "leads": {
-            "total": total_leads["count"],
-            "avg_score": round(avg_score["avg"] or 0, 1),
-            "grades": {r["score_grade"]: r["count"] for r in lead_grades},
+            "total": total_leads.count or 0,
+            "avg_score": round(sum(scores) / len(scores), 1) if scores else 0,
+            "grades": grades,
         },
         "pitches": {
-            "total": total_pitches["count"],
-            "ready_to_call": ready_calls["count"],
-            "ready_to_email": ready_emails["count"],
-            "avg_score": round(avg_pitch_score["avg"] or 0, 1),
+            "total": total_pitches.count or 0,
+            "ready_to_call": ready_calls.count or 0,
+            "ready_to_email": ready_emails.count or 0,
+            "avg_score": round(sum(pitch_scores) / len(pitch_scores), 1) if pitch_scores else 0,
         },
         "outreach": {
-            "calls_total": total_calls["count"],
-            "calls_completed": completed_calls["count"],
-            "emails_total": total_emails["count"],
-            "emails_sent": sent_emails["count"],
+            "calls_total": total_calls.count or 0,
+            "calls_completed": completed_calls.count or 0,
+            "emails_total": total_emails.count or 0,
+            "emails_sent": sent_emails.count or 0,
         },
         "agents": {
-            "total": total_agents["count"],
+            "total": total_agents.count or 0,
         },
-        "recent_campaigns": [dict(r) for r in recent],
-        "audit_log": [dict(r) for r in audit],
+        "recent_campaigns": recent.data or [],
+        "audit_log": audit.data or [],
         "cost_estimate": cost_summary,
     }
 
