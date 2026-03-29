@@ -346,7 +346,20 @@ async def stream_agent_events(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    """Health check + env var diagnostic (shows which keys are set, not values)."""
+    env_keys = [
+        "GOOGLE_API_KEY", "FIRECRAWL_API_KEY", "BRAVE_API_KEY",
+        "GOOGLE_MAPS_API_KEY", "ELEVENLABS_API_KEY",
+        "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER",
+        "SUPABASE_URL", "SUPABASE_ANON_KEY",
+        "ORQ_API_KEY", "ALLOWED_ORIGINS", "WEBHOOK_BASE_URL",
+    ]
+    configured = {k: bool(os.getenv(k, "")) for k in env_keys}
+    return {
+        "status": "ok",
+        "env_configured": configured,
+        "allowed_origins": ALLOWED_ORIGINS,
+    }
 
 
 @app.post("/api/analyze")
@@ -357,6 +370,18 @@ async def analyze_website(req: AnalyzeRequest):
     if not safe_url:
         raise HTTPException(status_code=400, detail="Invalid or unsafe URL")
 
+    # Reset pipeline state for fresh analysis
+    pipeline_state["business_analysis"] = None
+    pipeline_state["leads"] = []
+    pipeline_state["scored_leads"] = []
+    pipeline_state["pitches"] = []
+    pipeline_state["judged_pitches"] = []
+    pipeline_state["elevenlabs_agents"] = []
+    pipeline_state["call_results"] = []
+    pipeline_state["campaign_id"] = None
+    logger.info("Pipeline state reset for new analysis: %s", safe_url)
+
+    # Always create a fresh session for a new analysis
     session_id = await get_or_create_session()
     message = f"Analyze this business website and run the full pipeline: {safe_url}"
 
