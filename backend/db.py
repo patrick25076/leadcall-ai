@@ -21,7 +21,8 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-DB_PATH = os.path.join(os.path.dirname(__file__), "leadcall.db")
+# DB path: use env var, or /tmp in production (writable), or local in dev
+DB_PATH = os.getenv("SQLITE_DB_PATH", os.path.join(os.path.dirname(__file__), "leadcall.db"))
 
 # For MVP, we use synchronous SQLite with proper connection handling.
 # When Supabase is configured, switch to asyncpg.

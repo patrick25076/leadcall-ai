@@ -32,10 +32,13 @@ db._conn = None  # Reset connection so it picks up new path
 
 
 @pytest.fixture(autouse=True)
-def reset_db_connection():
-    """Ensure each test gets a fresh DB connection (fixes SQLite thread issues)."""
+def reset_db_and_rate_limiter():
+    """Reset DB connection and rate limiter between tests."""
     import db as _db
     _db._conn = None
+    # Reset rate limiter so tests don't hit 429
+    from security import rate_limiter
+    rate_limiter._buckets.clear()
     yield
     _db._conn = None
 os.environ["BRAVE_API_KEY"] = ""

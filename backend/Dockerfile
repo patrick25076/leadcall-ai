@@ -12,9 +12,8 @@ COPY . .
 # Don't copy .env (secrets via env vars in deployment)
 RUN rm -f .env
 
-# Non-root user for security
-RUN adduser --disabled-password --no-create-home appuser
-USER appuser
+# Use /tmp for SQLite (writable by any user)
+ENV SQLITE_DB_PATH=/tmp/grai.db
 
 EXPOSE ${PORT:-8000}
 

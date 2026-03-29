@@ -1,5 +1,7 @@
 "use client";
 
+export const dynamic = "force-dynamic";
+
 import { useState, useRef, useCallback, useEffect } from "react";
 import OnboardingWizard, { type OnboardingConfig } from "@/components/OnboardingWizard";
 import Dashboard from "@/components/Dashboard";
