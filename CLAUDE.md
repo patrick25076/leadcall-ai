@@ -1,5 +1,19 @@
 # GRAI — The Voice of Your Business
 
+## Workflow
+
+- **Always work on `main` branch.** No feature branches.
+- **Always push after completing work.** `git add` + `git commit` + `git push origin main`.
+- Vercel (frontend) and Render (backend) auto-deploy from main.
+
+## Site Password Gate
+
+The frontend has a password gate via Next.js middleware (`frontend/middleware.ts`).
+- Set `SITE_PASSWORD` env var on Vercel to enable (any string).
+- If `SITE_PASSWORD` is not set, the gate is disabled (open access).
+- Password is checked via `/api/unlock` route and stored in an httpOnly cookie (30 days).
+- This is a dev-phase lock — remove when launching publicly.
+
 ## Brand Identity
 
 **GRAI** is an AI-powered outreach platform that finds ideal customers, crafts personalized pitches, and reaches out via AI voice calls and email — all from a single URL input.

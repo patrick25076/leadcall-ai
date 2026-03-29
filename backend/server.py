@@ -123,17 +123,6 @@ ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
-)
-
-# Auth middleware (Supabase JWT validation)
-app.add_middleware(AuthMiddleware)
-
 
 # Security headers middleware
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -143,12 +132,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             response.headers[header] = value
         return response
 
-app.add_middleware(SecurityHeadersMiddleware)
-
 
 # Rate limiting middleware
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # Skip rate limiting for CORS preflight
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         # Extract client IP
         client_ip = request.client.host if request.client else "unknown"
 
@@ -177,8 +168,19 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         return await call_next(request)
 
-app.add_middleware(RateLimitMiddleware)
+# Middleware order: added last = executed first.
+# CORS must run first to handle OPTIONS preflight before auth/rate-limiting.
 app.add_middleware(RequestTimingMiddleware)
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(AuthMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 
 # ─── Request Models (with validation) ──────────────────────────────────────
