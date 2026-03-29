@@ -346,6 +346,7 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
             agents={agents}
             pipelineState={pipelineState}
             sessionId={sessionId}
+            campaignId={campaignId}
           />
         )}
 
@@ -354,6 +355,7 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
             calls={calls}
             leads={leads}
             agents={agents}
+            campaignId={campaignId}
           />
         )}
 

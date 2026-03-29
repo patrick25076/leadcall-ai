@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import VoiceSelector from "./VoiceSelector";
 
 type Pitch = Record<string, unknown>;
 type Agent = Record<string, unknown>;
@@ -12,16 +13,22 @@ interface OutreachPanelProps {
   agents: Agent[];
   pipelineState: Record<string, unknown> | null;
   sessionId: string | null;
+  campaignId?: number;
 }
 
 type SetupStep = "not_started" | "voice_setup" | "creating" | "testing" | "approving";
 
-export default function OutreachPanel({ pitches, agents, pipelineState, sessionId }: OutreachPanelProps) {
+export default function OutreachPanel({ pitches, agents, pipelineState, sessionId, campaignId }: OutreachPanelProps) {
   const [setupStep, setSetupStep] = useState<SetupStep>(agents.length > 0 ? "testing" : "not_started");
   const [testPhone, setTestPhone] = useState("");
   const [testEmail, setTestEmail] = useState("");
   const [testingCall, setTestingCall] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
+  const [selectedVoiceId, setSelectedVoiceId] = useState("JBFqnCBsd6RMkjVDRZzb");
+  const [selectedVoiceName, setSelectedVoiceName] = useState("George");
+  const [showVoiceSelector, setShowVoiceSelector] = useState(false);
+  const [approvedLeads, setApprovedLeads] = useState<Set<string>>(new Set());
+  const [batchStatus, setBatchStatus] = useState<string | null>(null);
 
   // Voice setup via WebSocket (native audio)
   const [voiceActive, setVoiceActive] = useState(false);
@@ -258,19 +265,60 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
 
         {/* Step 1: Voice Setup (not started) */}
         {setupStep === "not_started" && (
-          <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-6 text-center">
-            <div className="text-4xl mb-4">🎙️</div>
-            <h2 className="text-xl font-semibold text-white mb-2">Set Up Your Voice Agent</h2>
-            <p className="text-zinc-400 text-sm mb-6 max-w-md mx-auto">
-              Talk to GRAI to configure how your AI calls leads. We'll ask about your business,
-              call style, and goals — then create personalized voice agents for each lead.
-            </p>
+          <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-6">
+            <div className="text-center mb-6">
+              <h2 className="text-xl font-semibold text-white mb-2">Set Up Your Voice Agent</h2>
+              <p className="text-zinc-400 text-sm max-w-md mx-auto">
+                Choose a voice, then configure how your AI calls leads.
+              </p>
+            </div>
+
+            {/* Voice Selection */}
+            <div className="mb-6">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-medium text-zinc-300">Voice</h3>
+                <button
+                  onClick={() => setShowVoiceSelector(!showVoiceSelector)}
+                  className="text-xs text-emerald-400 hover:text-emerald-300"
+                >
+                  {showVoiceSelector ? "Hide voices" : "Change voice"}
+                </button>
+              </div>
+              {!showVoiceSelector ? (
+                <div className="flex items-center gap-3 p-3 bg-zinc-800/30 rounded-lg">
+                  <div className="w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center text-sm">
+                    {selectedVoiceName[0]}
+                  </div>
+                  <div>
+                    <p className="text-sm text-white font-medium">{selectedVoiceName}</p>
+                    <p className="text-xs text-zinc-500">Selected voice</p>
+                  </div>
+                </div>
+              ) : (
+                <VoiceSelector
+                  selectedVoiceId={selectedVoiceId}
+                  onSelect={(id, name) => {
+                    setSelectedVoiceId(id);
+                    setSelectedVoiceName(name);
+                    setShowVoiceSelector(false);
+                    // Save voice to preferences
+                    fetch(`${API}/api/voice-config`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ voice_id: id }),
+                    }).catch(() => {});
+                  }}
+                  language={String((pipelineState as Record<string, Record<string, string>> | null)?.business_analysis?.language_code || "")}
+                />
+              )}
+            </div>
+
             <div className="flex flex-col gap-3 max-w-xs mx-auto">
               <button
                 onClick={startVoiceSetup}
                 className="bg-emerald-600 text-white font-medium py-3 px-6 rounded-xl hover:bg-emerald-500 transition-colors flex items-center justify-center gap-2"
               >
-                <span>🎤</span> Start Voice Setup
+                Start Voice Setup
               </button>
               <button
                 onClick={createAgentsViaChat}
@@ -435,29 +483,85 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-white font-medium">Approve Outbound Calls ({readyToCall.length})</h3>
                 {readyToCall.length > 0 && (
-                  <button className="text-xs bg-emerald-600 text-white px-4 py-1.5 rounded-lg hover:bg-emerald-500 transition-colors">
-                    Approve All & Launch
+                  <button
+                    onClick={async () => {
+                      if (!campaignId) return;
+                      setBatchStatus("Launching calls...");
+                      // Approve all if none explicitly approved
+                      const toCall = approvedLeads.size > 0
+                        ? readyToCall.filter((p) => approvedLeads.has(String(p.lead_name)))
+                        : readyToCall;
+                      try {
+                        const resp = await fetch(`${API}/api/campaigns/${campaignId}/batch-call`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            lead_ids: toCall.map((_, i) => i),
+                            delay_seconds: 30,
+                          }),
+                        });
+                        const data = await resp.json();
+                        setBatchStatus(`${data.total_calls} calls queued! Calling every 30 seconds.`);
+                      } catch {
+                        setBatchStatus("Failed to start batch calls.");
+                      }
+                    }}
+                    disabled={!!batchStatus}
+                    className="text-xs bg-emerald-600 text-white px-4 py-1.5 rounded-lg hover:bg-emerald-500 transition-colors disabled:opacity-50"
+                  >
+                    {approvedLeads.size > 0 ? `Launch ${approvedLeads.size} Approved` : "Approve All & Launch"}
                   </button>
                 )}
               </div>
+
+              {batchStatus ? (
+                <div className="mb-4 p-3 rounded-lg text-sm bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+                  {batchStatus}
+                </div>
+              ) : null}
+
               <div className="space-y-2">
-                {readyToCall.map((p, i) => (
-                  <div key={i} className="flex items-center gap-4 p-3 bg-zinc-800/30 rounded-lg">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-white text-sm font-medium">{String(p.lead_name)}</p>
-                      <p className="text-zinc-500 text-xs">
-                        {String(p.contact_person || "No contact")} · {String(p.phone_number || "No phone")}
-                      </p>
+                {readyToCall.map((p, i) => {
+                  const name = String(p.lead_name);
+                  const isApproved = approvedLeads.has(name);
+                  return (
+                    <div key={i} className={`flex items-center gap-4 p-3 rounded-lg transition-colors ${
+                      isApproved ? "bg-emerald-500/5 border border-emerald-500/20" : "bg-zinc-800/30"
+                    }`}>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-white text-sm font-medium">{name}</p>
+                        <p className="text-zinc-500 text-xs">
+                          {String(p.contact_person || "No contact")} · {String(p.phone_number || "No phone")}
+                        </p>
+                      </div>
+                      <span className="text-xs text-zinc-500">{String(p.score || 0)}/10</span>
+                      <button
+                        onClick={() => {
+                          const next = new Set(approvedLeads);
+                          if (isApproved) next.delete(name); else next.add(name);
+                          setApprovedLeads(next);
+                        }}
+                        className={`text-xs px-3 py-1.5 rounded transition-colors ${
+                          isApproved
+                            ? "bg-emerald-600 text-white"
+                            : "bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30"
+                        }`}
+                      >
+                        {isApproved ? "Approved" : "Approve"}
+                      </button>
+                      <button
+                        onClick={() => {
+                          const next = new Set(approvedLeads);
+                          next.delete(name);
+                          setApprovedLeads(next);
+                        }}
+                        className="text-xs text-zinc-600 hover:text-red-400 px-2 py-1.5"
+                      >
+                        Skip
+                      </button>
                     </div>
-                    <span className="text-xs text-zinc-500">{String(p.score || 0)}/10</span>
-                    <button className="text-xs bg-emerald-600/20 text-emerald-400 px-3 py-1.5 rounded hover:bg-emerald-600/30">
-                      Approve
-                    </button>
-                    <button className="text-xs text-zinc-600 hover:text-red-400 px-2 py-1.5">
-                      Skip
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
                 {readyToCall.length === 0 && (
                   <p className="text-zinc-600 text-sm">No leads ready to call. Check the Leads tab.</p>
                 )}

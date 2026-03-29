@@ -91,9 +91,15 @@ CREATE TABLE IF NOT EXISTS calls (
     transcript      TEXT,
     outcome         TEXT,
     duration_secs   INTEGER,
+    recording_url   TEXT,
+    analysis        JSONB,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Migration: add recording_url and analysis to calls (run if table already exists)
+-- ALTER TABLE calls ADD COLUMN IF NOT EXISTS recording_url TEXT;
+-- ALTER TABLE calls ADD COLUMN IF NOT EXISTS analysis JSONB;
 
 -- Email outreach
 CREATE TABLE IF NOT EXISTS email_outreach (

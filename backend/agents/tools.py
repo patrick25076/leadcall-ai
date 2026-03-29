@@ -790,6 +790,69 @@ def save_judged_pitches(judged_json: str) -> dict:
 # 5. CALL MANAGER TOOLS — ElevenLabs with Dynamic Variables + Twilio Webhook
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@traced(type="tool", name="list_voices")
+def list_voices(language: str = "") -> dict:
+    """Lists available ElevenLabs voices for agent creation.
+
+    Args:
+        language: Optional language filter (e.g. "en", "ro", "de")
+
+    Returns:
+        dict with available voices including id, name, description, language, gender, preview_url
+    """
+    api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    if not api_key:
+        return {
+            "status": "success",
+            "mode": "mock",
+            "voices": [
+                {"voice_id": "JBFqnCBsd6RMkjVDRZzb", "name": "George", "gender": "male", "language": "en"},
+                {"voice_id": "EXAVITQu4vr4xnSDxMaL", "name": "Sarah", "gender": "female", "language": "en"},
+            ],
+        }
+
+    try:
+        resp = httpx.get(
+            "https://api.elevenlabs.io/v1/voices",
+            headers={"xi-api-key": api_key},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        voices = []
+        for v in data.get("voices", []):
+            labels = v.get("labels", {}) or {}
+            voice_lang = labels.get("language", "").lower()
+            voice_gender = labels.get("gender", "").lower()
+
+            # Filter by language if specified
+            if language and voice_lang and language.lower() not in voice_lang:
+                continue
+
+            voices.append({
+                "voice_id": v.get("voice_id", ""),
+                "name": v.get("name", ""),
+                "description": labels.get("description", ""),
+                "language": voice_lang,
+                "gender": voice_gender,
+                "accent": labels.get("accent", ""),
+                "age": labels.get("age", ""),
+                "use_case": labels.get("use_case", ""),
+                "preview_url": v.get("preview_url", ""),
+                "category": v.get("category", ""),
+            })
+
+        return {
+            "status": "success",
+            "total": len(voices),
+            "voices": voices,
+        }
+    except Exception as e:
+        logger.error("List voices error: %s", e)
+        return {"status": "error", "error": "Failed to list voices"}
+
+
 @traced(type="tool", name="create_elevenlabs_agent")
 def create_elevenlabs_agent(
     agent_name: str,
@@ -986,7 +1049,15 @@ RULES:
                     "turn_timeout": 10,
                 },
                 "conversation": {
-                    "max_duration_seconds": 300,
+                    "max_duration_seconds": int(voice_cfg.get("max_call_duration", 300)),
+                },
+                "voicemail_detection": {
+                    "enabled": True,
+                    "voicemail_action": voice_cfg.get("voicemail_action", "leave_message"),
+                    "voicemail_message": voice_cfg.get("voicemail_message", "")
+                        or f"Hi, this is {dynamic_variables.get('your_company', 'GRAI')}. "
+                           f"I was calling regarding a potential business opportunity. "
+                           f"Please call us back at your convenience. Thank you.",
                 },
             },
             "analysis": {
@@ -1257,6 +1328,28 @@ def get_call_status(agent_id: str) -> dict:
                 recording_url = detail.get("metadata", {}).get("recording_url") or detail.get("recording_url")
                 if recording_url:
                     call_info["recording_url"] = recording_url
+
+                # Persist call details to DB
+                cid = _campaign_id()
+                if cid:
+                    from db import get_db, is_configured
+                    if is_configured():
+                        try:
+                            update_data: dict = {
+                                "status": call_info.get("status", "completed"),
+                                "transcript": call_info.get("transcript_text", ""),
+                                "duration_secs": call_info.get("duration_seconds", 0),
+                            }
+                            if recording_url:
+                                update_data["recording_url"] = recording_url
+                            if call_info.get("analysis"):
+                                update_data["analysis"] = call_info["analysis"]
+                            # Update by agent_id match
+                            get_db().table("calls").update(update_data).eq(
+                                "agent_id", agent_id
+                            ).eq("campaign_id", cid).execute()
+                        except Exception:
+                            pass  # Non-critical, don't fail the call status check
 
                 detailed_calls.append(call_info)
             except Exception:

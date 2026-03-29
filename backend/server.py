@@ -524,6 +524,162 @@ async def reset_pipeline():
     return {"status": "reset"}
 
 
+# ─── Voice Endpoints ──────────────────────────────────────────────────────
+
+@app.get("/api/voices")
+async def list_voices_endpoint(language: str = ""):
+    """List available ElevenLabs voices."""
+    from agents.tools import list_voices
+    return list_voices(language)
+
+
+# ─── Batch Calling ─────────────────────────────────────────────────────────
+
+@app.post("/api/campaigns/{campaign_id}/batch-call")
+async def batch_call(campaign_id: int, request: Request):
+    """Queue batch outbound calls for approved leads with delay between calls."""
+    body = await request.json()
+    lead_ids: list[int] = body.get("lead_ids", [])
+    delay_seconds: int = body.get("delay_seconds", 30)
+
+    if not lead_ids:
+        raise HTTPException(status_code=400, detail="No leads selected for calling")
+
+    # Load campaign state to get agents and leads
+    state = get_campaign_state(campaign_id)
+    agents_list = state.get("elevenlabs_agents", [])
+    if not agents_list:
+        raise HTTPException(status_code=400, detail="No voice agents created. Set up voice agents first.")
+
+    # Match leads to agents by name
+    judged = state.get("judged_pitches", [])
+    scored = state.get("scored_leads", [])
+
+    batch_id = f"batch_{campaign_id}_{uuid.uuid4().hex[:8]}"
+    calls_queued = []
+
+    for pitch in judged:
+        phone = pitch.get("phone_number") or ""
+        lead_name = pitch.get("lead_name", "")
+        if not phone:
+            continue
+
+        # Find matching agent
+        agent = None
+        for a in agents_list:
+            if lead_name.lower() in (a.get("name", "") or "").lower():
+                agent = a
+                break
+        if not agent:
+            agent = agents_list[0]  # Use first agent as fallback
+
+        calls_queued.append({
+            "lead_name": lead_name,
+            "phone_number": phone,
+            "agent_id": agent.get("agent_id", ""),
+        })
+
+    # Run calls in background with delay
+    async def _run_batch():
+        from agents.tools import make_outbound_call
+        for i, call in enumerate(calls_queued):
+            if i > 0:
+                await asyncio.sleep(delay_seconds)
+            try:
+                make_outbound_call(call["agent_id"], call["phone_number"])
+                logger.info("Batch call %d/%d: %s", i + 1, len(calls_queued), call["lead_name"])
+            except Exception as e:
+                logger.error("Batch call failed for %s: %s", call["lead_name"], e)
+
+    asyncio.create_task(_run_batch())
+
+    return {
+        "status": "queued",
+        "batch_id": batch_id,
+        "total_calls": len(calls_queued),
+        "delay_seconds": delay_seconds,
+        "calls": calls_queued,
+    }
+
+
+# ─── Analytics ─────────────────────────────────────────────────────────────
+
+@app.get("/api/campaigns/{campaign_id}/analytics")
+async def campaign_analytics(campaign_id: int):
+    """Get aggregate call analytics for a campaign."""
+    from db import get_calls_for_campaign, get_leads, is_configured
+
+    if not is_configured():
+        return {"status": "no_db", "analytics": {}}
+
+    calls = get_calls_for_campaign(campaign_id)
+    leads = get_leads(campaign_id)
+
+    total = len(calls)
+    completed = [c for c in calls if c.get("status") == "completed"]
+    initiated = [c for c in calls if c.get("status") in ("initiated", "ringing", "in-progress")]
+    failed = [c for c in calls if c.get("status") in ("failed", "no-answer", "busy")]
+
+    # Duration stats
+    durations = [c.get("duration_secs", 0) or 0 for c in completed if c.get("duration_secs")]
+    avg_duration = sum(durations) / len(durations) if durations else 0
+    total_duration = sum(durations)
+
+    # Analysis stats
+    meetings = 0
+    interested_count = 0
+    objections_list: list[str] = []
+
+    for c in calls:
+        analysis = c.get("analysis", {}) or {}
+        collected = analysis.get("collected_data", {}) or {}
+        evaluation = analysis.get("evaluation_results", {}) or {}
+
+        if collected.get("meeting_booked") in (True, "yes", "Yes", "true"):
+            meetings += 1
+        interest = evaluation.get("lead_interest", "")
+        if interest in ("high", "medium"):
+            interested_count += 1
+        obj = collected.get("lead_objections", "")
+        if obj and str(obj).lower() not in ("none", "n/a", ""):
+            objections_list.append(str(obj)[:100])
+
+    # Lead stats
+    grade_dist = {"A": 0, "B": 0, "C": 0, "D": 0}
+    for lead in leads:
+        grade = lead.get("score_grade", "D")
+        grade_dist[grade] = grade_dist.get(grade, 0) + 1
+
+    return {
+        "status": "success",
+        "analytics": {
+            "calls": {
+                "total": total,
+                "completed": len(completed),
+                "in_progress": len(initiated),
+                "failed": len(failed),
+                "answer_rate": round(len(completed) / total * 100, 1) if total else 0,
+            },
+            "duration": {
+                "average_seconds": round(avg_duration, 1),
+                "total_seconds": total_duration,
+                "total_minutes": round(total_duration / 60, 1),
+            },
+            "outcomes": {
+                "meetings_booked": meetings,
+                "interested": interested_count,
+                "meeting_rate": round(meetings / len(completed) * 100, 1) if completed else 0,
+                "interest_rate": round(interested_count / len(completed) * 100, 1) if completed else 0,
+            },
+            "objections": objections_list[:10],
+            "leads": {
+                "total": len(leads),
+                "grade_distribution": grade_dist,
+            },
+        },
+    }
+
+
 # ─── GDPR Endpoints ─────────────────────────────────────────────────────────
 
 @app.delete("/api/leads/{lead_id}")
