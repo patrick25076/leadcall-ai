@@ -40,6 +40,7 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
   const [activeAgent, setActiveAgent] = useState<string | null>(null);
   const [pipelineComplete, setPipelineComplete] = useState(false);
   const [chatInput, setChatInput] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   // Restore state on mount
   useEffect(() => {
@@ -59,7 +60,7 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
           if (state.judged_pitches?.length > 0) setPipelineComplete(true);
         }
       })
-      .catch(() => {});
+      .catch((err) => { console.error("API error:", err); setError("Connection error. Check if the backend is running."); });
 
     // If we have a URL from onboarding but no analysis yet, auto-start
     const savedUrl = loadFromStorage<string>("url", "");
@@ -78,7 +79,7 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
       fetch(stateUrl)
         .then((r) => r.json())
         .then((state) => setPipelineState(state))
-        .catch(() => {});
+        .catch((err) => { console.error("API error:", err); setError("Connection error. Check if the backend is running."); });
     }, 5000);
     return () => clearInterval(interval);
   }, [running, campaignId]);
@@ -120,7 +121,7 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
               fetch(su)
                 .then((r) => r.json())
                 .then((state) => setPipelineState(state))
-                .catch(() => {});
+                .catch((err) => { console.error("API error:", err); setError("Connection error. Check if the backend is running."); });
             }
           } catch {}
         } else if (line.startsWith("event:")) {
@@ -134,7 +135,7 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
         fetch(su)
           .then((r) => r.json())
           .then((state) => setPipelineState(state))
-          .catch(() => {});
+          .catch((err) => { console.error("API error:", err); setError("Connection error. Check if the backend is running."); });
       }
     }
   }, []);
@@ -278,6 +279,14 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
           </button>
         </div>
       </header>
+
+      {/* Error Banner */}
+      {error ? (
+        <div className="border-b border-red-500/20 px-6 py-2 bg-red-500/5 flex items-center justify-between">
+          <span className="text-red-400 text-xs">{error}</span>
+          <button onClick={() => setError(null)} className="text-red-400/60 hover:text-red-400 text-xs">Dismiss</button>
+        </div>
+      ) : null}
 
       {/* Stats Bar */}
       {stats.leads > 0 && (

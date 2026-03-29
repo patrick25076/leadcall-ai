@@ -524,6 +524,78 @@ async def reset_pipeline():
     return {"status": "reset"}
 
 
+# ─── Email Outreach ────────────────────────────────────────────────────────
+
+@app.post("/api/campaigns/{campaign_id}/batch-email")
+async def batch_email(campaign_id: int, request: Request):
+    """Send emails to approved leads in a campaign."""
+    body = await request.json()
+    lead_names: list[str] = body.get("lead_names", [])
+
+    state = get_campaign_state(campaign_id)
+    judged = state.get("judged_pitches", [])
+    pitches_list = state.get("pitches", [])
+
+    from agents.tools import send_email as tool_send_email
+
+    sent = []
+    errors = []
+    for pitch in (judged if judged else pitches_list):
+        lead_name = pitch.get("lead_name", "")
+        if lead_names and lead_name not in lead_names:
+            continue
+
+        to_email = pitch.get("email", "") or pitch.get("to_email", "")
+        if not to_email:
+            # Try to find email from leads
+            for lead in state.get("leads", []):
+                if (lead.get("name", "") == lead_name) and lead.get("email"):
+                    to_email = lead["email"]
+                    break
+
+        if not to_email:
+            errors.append({"lead_name": lead_name, "error": "No email address"})
+            continue
+
+        subject = pitch.get("email_subject", "")
+        body_html = pitch.get("email_body", "")
+        if not subject or not body_html:
+            errors.append({"lead_name": lead_name, "error": "No email content"})
+            continue
+
+        result = tool_send_email(
+            to_email=to_email,
+            from_email=body.get("from_email", "noreply@grai.run"),
+            subject=subject,
+            body_html=body_html,
+            lead_name=lead_name,
+            campaign_id_override=campaign_id,
+        )
+        if result.get("status") == "success":
+            sent.append({"lead_name": lead_name, "to_email": to_email})
+        else:
+            errors.append({"lead_name": lead_name, "error": result.get("error", "Failed")})
+
+    return {
+        "status": "success",
+        "sent": len(sent),
+        "errors": len(errors),
+        "details": {"sent": sent, "errors": errors},
+    }
+
+
+@app.get("/api/campaigns/{campaign_id}/emails")
+async def list_emails(campaign_id: int):
+    """List all emails for a campaign."""
+    from db import is_configured, get_db
+    if not is_configured():
+        return {"emails": []}
+    result = get_db().table("email_outreach").select("*").eq(
+        "campaign_id", campaign_id
+    ).order("id", desc=True).execute()
+    return {"emails": result.data or []}
+
+
 # ─── Voice Endpoints ──────────────────────────────────────────────────────
 
 @app.get("/api/voices")

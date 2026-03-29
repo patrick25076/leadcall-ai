@@ -573,24 +573,43 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
               <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-5">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-white font-medium">Approve Emails ({readyToEmail.length})</h3>
-                  <button className="text-xs bg-blue-600/20 text-blue-400 px-4 py-1.5 rounded-lg hover:bg-blue-600/30">
-                    Approve All Emails
+                  <button
+                    onClick={async () => {
+                      if (!campaignId) return;
+                      setBatchStatus("Sending emails...");
+                      try {
+                        const resp = await fetch(`${API}/api/campaigns/${campaignId}/batch-email`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ lead_names: [] }),
+                        });
+                        const data = await resp.json();
+                        setBatchStatus(`${data.sent} emails sent, ${data.errors} failed.`);
+                      } catch {
+                        setBatchStatus("Failed to send emails.");
+                      }
+                    }}
+                    className="text-xs bg-blue-600 text-white px-4 py-1.5 rounded-lg hover:bg-blue-500 transition-colors"
+                  >
+                    Send All Emails
                   </button>
                 </div>
                 <div className="space-y-2">
                   {readyToEmail.map((p, i) => (
-                    <div key={i} className="flex items-center gap-4 p-3 bg-zinc-800/30 rounded-lg">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-white text-sm font-medium">{String(p.lead_name)}</p>
-                        <p className="text-zinc-400 text-xs truncate">Subject: {String(p.email_subject || "")}</p>
+                    <details key={i} className="group">
+                      <summary className="flex items-center gap-4 p-3 bg-zinc-800/30 rounded-lg cursor-pointer hover:bg-zinc-800/50 transition-colors">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-white text-sm font-medium">{String(p.lead_name)}</p>
+                          <p className="text-zinc-400 text-xs truncate">Subject: {String(p.email_subject || "")}</p>
+                        </div>
+                        <svg className="w-4 h-4 text-zinc-500 group-open:rotate-180 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </summary>
+                      <div className="mt-2 p-4 bg-zinc-800/20 rounded-lg text-sm text-zinc-400 whitespace-pre-wrap">
+                        {String(p.email_body || "No email body generated.")}
                       </div>
-                      <button className="text-xs bg-blue-600/20 text-blue-400 px-3 py-1.5 rounded hover:bg-blue-600/30">
-                        Approve
-                      </button>
-                      <button className="text-xs text-zinc-600 hover:text-red-400 px-2 py-1.5">
-                        Skip
-                      </button>
-                    </div>
+                    </details>
                   ))}
                 </div>
               </div>
@@ -607,7 +626,26 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
                   onChange={(e) => setTestEmail(e.target.value)}
                   className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500"
                 />
-                <button className="text-xs bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-500 transition-colors">
+                <button
+                  onClick={async () => {
+                    if (!testEmail.trim() || !readyToEmail[0]) return;
+                    const first = readyToEmail[0];
+                    try {
+                      const resp = await fetch(`${API}/api/chat`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          message: `Send a test email to ${testEmail} with subject "${String(first.email_subject)}" and the email body for ${String(first.lead_name)}.`,
+                          session_id: sessionId,
+                        }),
+                      });
+                      if (resp.ok) setTestResult("Test email sent! Check your inbox.");
+                    } catch {
+                      setTestResult("Failed to send test email.");
+                    }
+                  }}
+                  className="text-xs bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-500 transition-colors"
+                >
                   Send Test
                 </button>
               </div>

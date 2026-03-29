@@ -16,6 +16,24 @@ type Campaign = {
   agent_count: number;
 };
 
+type PipelineStage = "analyze" | "leads" | "pitches" | "voice" | "calling";
+
+function getCampaignStage(c: Campaign): PipelineStage {
+  if (c.agent_count > 0) return "calling";
+  if (c.pitch_count > 0) return "voice";
+  if (c.lead_count > 0) return "pitches";
+  if (c.business_name) return "leads";
+  return "analyze";
+}
+
+const STAGES: { key: PipelineStage; label: string }[] = [
+  { key: "analyze", label: "Analyze" },
+  { key: "leads", label: "Find Leads" },
+  { key: "pitches", label: "Pitches" },
+  { key: "voice", label: "Voice Setup" },
+  { key: "calling", label: "Calling" },
+];
+
 export default function CampaignList({
   onSelectCampaign,
   onNewCampaign,
@@ -115,41 +133,81 @@ export default function CampaignList({
           </div>
         ) : (
           <div className="grid gap-4">
-            {campaigns.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => {
-                  onSelectCampaign(c.id);
-                }}
-                className="w-full text-left p-5 bg-[#0d0d14] border border-zinc-800 rounded-xl hover:border-zinc-600 transition-all group"
-              >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-3 mb-1">
-                      <h3 className="text-base font-semibold text-zinc-200 group-hover:text-white truncate">
-                        {c.business_name || "Analyzing..."}
-                      </h3>
-                      <span className={`text-xs px-2 py-0.5 rounded-full ${statusColors[c.status] || statusColors.active}`}>
-                        {c.status}
-                      </span>
-                    </div>
-                    <p className="text-sm text-zinc-500 truncate">{c.website_url}</p>
-                    <div className="flex items-center gap-4 mt-3">
-                      <CampaignStat label="Leads" value={c.lead_count} />
-                      <CampaignStat label="Pitches" value={c.pitch_count} />
-                      <CampaignStat label="Agents" value={c.agent_count} />
-                      <span className="text-xs text-zinc-600 ml-auto">{formatDate(c.created_at)}</span>
-                    </div>
-                  </div>
-                  <svg
-                    className="w-5 h-5 text-zinc-600 group-hover:text-zinc-400 mt-1 ml-4 flex-shrink-0"
-                    fill="none" viewBox="0 0 24 24" stroke="currentColor"
+            {campaigns.map((c) => {
+              const stage = getCampaignStage(c);
+              const stageIdx = STAGES.findIndex((s) => s.key === stage);
+
+              return (
+                <div key={c.id} className="bg-[#0d0d14] border border-zinc-800 rounded-xl hover:border-zinc-600 transition-all group">
+                  <button
+                    onClick={() => onSelectCampaign(c.id)}
+                    className="w-full text-left p-5"
                   >
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-3 mb-1">
+                          <h3 className="text-base font-semibold text-zinc-200 group-hover:text-white truncate">
+                            {c.business_name || "Analyzing..."}
+                          </h3>
+                          <span className={`text-xs px-2 py-0.5 rounded-full ${statusColors[c.status] || statusColors.active}`}>
+                            {c.status}
+                          </span>
+                        </div>
+                        <p className="text-sm text-zinc-500 truncate">{c.website_url}</p>
+
+                        {/* Pipeline Progress */}
+                        <div className="flex items-center gap-1 mt-3 mb-3">
+                          {STAGES.map((s, i) => (
+                            <div key={s.key} className="flex items-center gap-1">
+                              <div className={`h-1.5 w-8 rounded-full ${
+                                i <= stageIdx ? "bg-emerald-500" : "bg-zinc-800"
+                              }`} />
+                            </div>
+                          ))}
+                          <span className="text-xs text-zinc-500 ml-2">{STAGES[stageIdx].label}</span>
+                        </div>
+
+                        <div className="flex items-center gap-4">
+                          <CampaignStat label="Leads" value={c.lead_count} />
+                          <CampaignStat label="Pitches" value={c.pitch_count} />
+                          <CampaignStat label="Agents" value={c.agent_count} />
+                          <span className="text-xs text-zinc-600 ml-auto">{formatDate(c.created_at)}</span>
+                        </div>
+                      </div>
+                      <svg
+                        className="w-5 h-5 text-zinc-600 group-hover:text-zinc-400 mt-1 ml-4 flex-shrink-0"
+                        fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                      >
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                    </div>
+                  </button>
+
+                  {/* Quick Actions */}
+                  <div className="border-t border-zinc-800/50 px-5 py-2 flex items-center gap-3">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onSelectCampaign(c.id); }}
+                      className="text-xs text-zinc-500 hover:text-emerald-400 transition-colors"
+                    >
+                      Open
+                    </button>
+                    <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        if (!confirm("Delete this campaign and all its data? This cannot be undone.")) return;
+                        try {
+                          await fetch(`${API}/api/campaigns/${c.id}`, { method: "DELETE" });
+                          fetchCampaigns();
+                        } catch {}
+                      }}
+                      className="text-xs text-zinc-600 hover:text-red-400 transition-colors ml-auto"
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
-              </button>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
