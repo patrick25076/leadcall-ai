@@ -97,6 +97,155 @@ def get_campaigns_for_user(user_id: str) -> list[dict]:
     result = get_db().table("campaigns").select(
         "id, website_url, business_name, status, created_at, updated_at"
     ).eq("user_id", user_id).order("id", desc=True).execute()
+    campaigns = result.data or []
+    # Enrich with counts
+    for c in campaigns:
+        cid = c["id"]
+        leads_r = get_db().table("leads").select("id", count="exact").eq("campaign_id", cid).execute()
+        pitches_r = get_db().table("pitches").select("id", count="exact").eq("campaign_id", cid).execute()
+        agents_r = get_db().table("agents").select("id", count="exact").eq("campaign_id", cid).execute()
+        c["lead_count"] = leads_r.count if leads_r.count is not None else len(leads_r.data or [])
+        c["pitch_count"] = pitches_r.count if pitches_r.count is not None else len(pitches_r.data or [])
+        c["agent_count"] = agents_r.count if agents_r.count is not None else len(agents_r.data or [])
+    return campaigns
+
+
+def get_campaign_state(campaign_id: int) -> dict:
+    """Reconstruct full pipeline state from DB tables for a campaign.
+
+    This is the single source of truth — replaces the in-memory pipeline_state dict.
+    """
+    if not is_configured():
+        return _empty_state(campaign_id)
+
+    try:
+        # Campaign + analysis
+        campaign = get_campaign(campaign_id)
+        analysis = campaign.get("analysis") if campaign else None
+
+        # Leads (scored + raw combined)
+        leads_data = get_leads(campaign_id)
+        scored = [l for l in leads_data if l.get("lead_score") is not None]
+        raw_leads = leads_data  # All leads are "raw" with optional score fields
+
+        # Pitches
+        pitches_result = get_db().table("pitches").select("*").eq(
+            "campaign_id", campaign_id
+        ).execute()
+        all_pitches = pitches_result.data or []
+
+        # Split into raw pitches and judged pitches
+        pitches = [p.get("raw_data") or p for p in all_pitches if not p.get("score")]
+        judged = [p.get("raw_data") or p for p in all_pitches if p.get("score")]
+
+        # If no separate judged, rebuild from pitch records that have scores
+        if not judged and all_pitches:
+            judged = []
+            for p in all_pitches:
+                if p.get("score") or p.get("ready_to_call") or p.get("ready_to_email"):
+                    j = p.get("raw_data") or {}
+                    j.update({
+                        "lead_name": p.get("lead_name", ""),
+                        "contact_person": p.get("contact_person", ""),
+                        "score": p.get("score", 0),
+                        "feedback": p.get("feedback", ""),
+                        "revised_pitch": p.get("revised_pitch", ""),
+                        "ready_to_call": p.get("ready_to_call", False),
+                        "ready_to_email": p.get("ready_to_email", False),
+                        "missing_info": p.get("missing_info", []),
+                        "pitch_script": p.get("pitch_script", ""),
+                        "email_subject": p.get("email_subject", ""),
+                        "email_body": p.get("email_body", ""),
+                    })
+                    judged.append(j)
+
+        # Agents
+        agents_result = get_db().table("agents").select("*").eq(
+            "campaign_id", campaign_id
+        ).execute()
+        agents = []
+        for a in (agents_result.data or []):
+            agents.append({
+                "agent_id": a.get("agent_id", ""),
+                "name": a.get("agent_name", ""),
+                "first_message_template": a.get("first_message", ""),
+                "system_prompt": a.get("system_prompt", ""),
+                "dynamic_variables": a.get("dynamic_vars", {}),
+                "language": a.get("language", "en"),
+            })
+
+        # Calls
+        calls_result = get_db().table("calls").select("*").eq(
+            "campaign_id", campaign_id
+        ).execute()
+        call_results = calls_result.data or []
+
+        # Preferences
+        prefs = get_prefs_db(campaign_id)
+        # Merge with defaults
+        default_prefs = {
+            "language": "English",
+            "call_style": "professional",
+            "business_hours_only": True,
+            "objective": "Book a demo meeting",
+        }
+        default_prefs.update(prefs)
+
+        return {
+            "business_analysis": analysis,
+            "leads": raw_leads,
+            "scored_leads": scored if scored else raw_leads,
+            "pitches": pitches if pitches else [p.get("raw_data") or p for p in all_pitches],
+            "judged_pitches": judged,
+            "preferences": default_prefs,
+            "elevenlabs_agents": agents,
+            "call_results": call_results,
+            "campaign_id": campaign_id,
+            "user_id": campaign.get("user_id", "") if campaign else "",
+        }
+    except Exception as e:
+        logger.error("Failed to load campaign state %d: %s", campaign_id, e)
+        return _empty_state(campaign_id)
+
+
+def _empty_state(campaign_id: int = 0) -> dict:
+    """Return an empty pipeline state dict."""
+    return {
+        "business_analysis": None,
+        "leads": [],
+        "scored_leads": [],
+        "pitches": [],
+        "judged_pitches": [],
+        "preferences": {
+            "language": "English",
+            "call_style": "professional",
+            "business_hours_only": True,
+            "objective": "Book a demo meeting",
+        },
+        "elevenlabs_agents": [],
+        "call_results": [],
+        "campaign_id": campaign_id,
+        "user_id": "",
+    }
+
+
+def get_agents_for_campaign(campaign_id: int) -> list[dict]:
+    """Get all agents for a campaign."""
+    if not is_configured():
+        return []
+    result = get_db().table("agents").select("*").eq(
+        "campaign_id", campaign_id
+    ).execute()
+    return result.data or []
+
+
+def get_calls_for_campaign(campaign_id: int) -> list[dict]:
+    """Get all calls for a campaign."""
+    if not is_configured():
+        return []
+    result = get_db().table("calls").select("*").eq(
+        "campaign_id", campaign_id
+    ).execute()
     return result.data or []
 
 

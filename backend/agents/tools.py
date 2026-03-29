@@ -62,25 +62,33 @@ from db import (
     save_call_db,
     save_prefs_db,
     get_prefs_db,
+    get_campaign_state,
+    _empty_state,
 )
 
-# ─── In-memory state (shared across pipeline, also persisted to SQLite) ────
-pipeline_state = {
-    "business_analysis": None,
-    "leads": [],
-    "scored_leads": [],
-    "pitches": [],
-    "judged_pitches": [],
-    "preferences": {
-        "language": "English",
-        "call_style": "professional",
-        "business_hours_only": True,
-        "objective": "Book a demo meeting",
-    },
-    "elevenlabs_agents": [],
-    "call_results": [],
-    "campaign_id": None,
-}
+
+# ─── Campaign-scoped state (DB-backed with in-memory cache) ────────────────
+#
+# pipeline_state is a dict that acts as a cache. On first access per campaign,
+# it loads from DB. All writes go to both the cache AND DB.
+# The active campaign_id is set by the server before running the pipeline.
+
+pipeline_state: dict = _empty_state()
+
+
+def load_campaign_state(campaign_id: int) -> None:
+    """Load a campaign's state from DB into the pipeline_state cache."""
+    global pipeline_state
+    if campaign_id and campaign_id > 0:
+        pipeline_state = get_campaign_state(campaign_id)
+    else:
+        pipeline_state = _empty_state()
+
+
+def reset_pipeline_state() -> None:
+    """Reset the pipeline state cache to empty."""
+    global pipeline_state
+    pipeline_state = _empty_state()
 
 
 def _campaign_id() -> int:
@@ -88,7 +96,7 @@ def _campaign_id() -> int:
     cid = pipeline_state.get("campaign_id")
     if cid:
         return cid
-    camp = get_latest_campaign()
+    camp = get_latest_campaign(pipeline_state.get("user_id", ""))
     if camp:
         pipeline_state["campaign_id"] = camp["id"]
         return camp["id"]

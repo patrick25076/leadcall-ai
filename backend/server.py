@@ -69,9 +69,9 @@ from google.adk.agents.live_request_queue import LiveRequestQueue
 from google.genai import types as genai_types
 
 from agents.agent import root_agent, voice_config_live_agent
-from agents.tools import pipeline_state
+from agents.tools import pipeline_state, load_campaign_state, reset_pipeline_state
 from auth import AuthMiddleware
-from db import get_conn
+from db import get_conn, get_campaigns_for_user, get_campaign_state, get_campaign, create_campaign as db_create_campaign
 from security import (
     check_rate_limit,
     sanitize_url,
@@ -85,7 +85,6 @@ from observability import RequestTimingMiddleware, start_pipeline_tracking, log_
 # ─── ADK Runner Setup ──────────────────────────────────────────────────────
 
 APP_NAME = "leadcall_ai"
-USER_ID = "default_user"
 
 runner = InMemoryRunner(agent=root_agent, app_name=APP_NAME)
 
@@ -202,14 +201,19 @@ class CallRequest(BaseModel):
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
-async def get_or_create_session(session_id: Optional[str] = None) -> str:
+def _get_user_id(request: Request) -> str:
+    """Extract user_id from the auth middleware state."""
+    return getattr(request.state, "user_id", "anon") if hasattr(request, "state") else "anon"
+
+
+async def get_or_create_session(session_id: Optional[str] = None, user_id: str = "default_user") -> str:
     """Get existing session or create a new one. Reuses sessions for conversation continuity."""
     # Reuse existing session if valid (critical for chat context)
     if session_id and session_id in _registered_sessions:
         try:
             existing = await runner.session_service.get_session(
                 app_name=runner.app_name,
-                user_id=USER_ID,
+                user_id=user_id,
                 session_id=session_id,
             )
             if existing:
@@ -220,7 +224,7 @@ async def get_or_create_session(session_id: Optional[str] = None) -> str:
     # Create new session
     session = await runner.session_service.create_session(
         app_name=runner.app_name,
-        user_id=USER_ID,
+        user_id=user_id,
     )
     _registered_sessions.add(session.id)
     return session.id
@@ -305,7 +309,7 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 
 async def stream_agent_events(
-    session_id: str, message: str
+    session_id: str, message: str, user_id: str = "default_user"
 ) -> AsyncGenerator[dict, None]:
     """Runs the agent and yields SSE-formatted event dicts with retry on 429."""
     user_message = genai_types.Content(
@@ -317,7 +321,7 @@ async def stream_agent_events(
     while True:
         try:
             async for event in runner.run_async(
-                user_id=USER_ID,
+                user_id=user_id,
                 session_id=session_id,
                 new_message=user_message,
             ):
@@ -363,32 +367,26 @@ async def health():
 
 
 @app.post("/api/analyze")
-async def analyze_website(req: AnalyzeRequest):
+async def analyze_website(req: AnalyzeRequest, request: Request):
     """Starts the analysis pipeline for a URL. Returns SSE stream."""
-    # Validate URL
     safe_url = sanitize_url(req.url)
     if not safe_url:
         raise HTTPException(status_code=400, detail="Invalid or unsafe URL")
 
+    user_id = _get_user_id(request)
+
     # Reset pipeline state for fresh analysis
-    pipeline_state["business_analysis"] = None
-    pipeline_state["leads"] = []
-    pipeline_state["scored_leads"] = []
-    pipeline_state["pitches"] = []
-    pipeline_state["judged_pitches"] = []
-    pipeline_state["elevenlabs_agents"] = []
-    pipeline_state["call_results"] = []
-    pipeline_state["campaign_id"] = None
+    reset_pipeline_state()
+    pipeline_state["user_id"] = user_id
     logger.info("Pipeline state reset for new analysis: %s", safe_url)
 
-    # Always create a fresh session for a new analysis
-    session_id = await get_or_create_session()
+    session_id = await get_or_create_session(user_id=user_id)
     message = f"Analyze this business website and run the full pipeline: {safe_url}"
 
     async def event_generator():
         yield {"event": "session", "data": json.dumps({"session_id": session_id})}
         try:
-            async for event_data in stream_agent_events(session_id, message):
+            async for event_data in stream_agent_events(session_id, message, user_id=user_id):
                 yield {"event": "agent", "data": json.dumps(event_data, default=str)}
         except Exception as e:
             logger.error("Pipeline error: %s", e)
@@ -401,28 +399,34 @@ async def analyze_website(req: AnalyzeRequest):
                     "content": "An error occurred during analysis. Please try again.",
                 }),
             }
+        # Return campaign_id so frontend can track this campaign
         yield {
             "event": "pipeline_complete",
-            "data": json.dumps(pipeline_state, default=str),
+            "data": json.dumps({
+                **pipeline_state,
+                "campaign_id": pipeline_state.get("campaign_id"),
+            }, default=str),
         }
 
     return EventSourceResponse(event_generator(), ping=5)
 
 
 @app.post("/api/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
     """General chat with the orchestrator. Returns SSE stream."""
     message = sanitize_chat_message(req.message)
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
+    user_id = _get_user_id(request)
+
     # CRITICAL: Reuse session from client so agent has conversation context
-    session_id = await get_or_create_session(req.session_id)
+    session_id = await get_or_create_session(req.session_id, user_id=user_id)
 
     async def event_generator():
         yield {"event": "session", "data": json.dumps({"session_id": session_id})}
         try:
-            async for event_data in stream_agent_events(session_id, message):
+            async for event_data in stream_agent_events(session_id, message, user_id=user_id):
                 yield {"event": "agent", "data": json.dumps(event_data, default=str)}
         except Exception as e:
             logger.error("Chat error: %s", e)
@@ -439,9 +443,32 @@ async def chat(req: ChatRequest):
     return EventSourceResponse(event_generator(), ping=5)
 
 
+# ─── Campaign Endpoints ───────────────────────────────────────────────────
+
+@app.get("/api/campaigns")
+async def list_campaigns(request: Request):
+    """List all campaigns for the authenticated user."""
+    user_id = _get_user_id(request)
+    campaigns = get_campaigns_for_user(user_id)
+    return {"campaigns": campaigns}
+
+
+@app.get("/api/campaigns/{campaign_id}/state")
+async def get_campaign_state_endpoint(campaign_id: int, request: Request):
+    """Get the full pipeline state for a specific campaign."""
+    state = get_campaign_state(campaign_id)
+    return state
+
+
 @app.get("/api/state")
-async def get_state():
-    """Returns the current pipeline state."""
+async def get_state(request: Request):
+    """Returns the current pipeline state. Supports ?campaign_id=N for specific campaign."""
+    campaign_id = request.query_params.get("campaign_id")
+    if campaign_id:
+        try:
+            return get_campaign_state(int(campaign_id))
+        except (ValueError, TypeError):
+            pass
     return pipeline_state
 
 
@@ -492,14 +519,7 @@ async def update_preferences(prefs: dict):
 @app.post("/api/reset")
 async def reset_pipeline():
     """Resets the pipeline state."""
-    pipeline_state["business_analysis"] = None
-    pipeline_state["leads"] = []
-    pipeline_state["scored_leads"] = []
-    pipeline_state["pitches"] = []
-    pipeline_state["judged_pitches"] = []
-    pipeline_state["elevenlabs_agents"] = []
-    pipeline_state["call_results"] = []
-    pipeline_state["campaign_id"] = None
+    reset_pipeline_state()
     _registered_sessions.clear()
     return {"status": "reset"}
 
@@ -553,12 +573,23 @@ async def twilio_outbound_handler(request: Request):
     form_data = await request.form() if request.method == "POST" else {}
     to_number = form_data.get("To", "")
 
-    # Find dynamic variables for this agent
+    # Find dynamic variables for this agent (check cache first, then DB)
     dynamic_vars = {}
     for agent in pipeline_state.get("elevenlabs_agents", []):
         if agent.get("agent_id") == agent_id:
             dynamic_vars = agent.get("dynamic_variables", {})
             break
+    if not dynamic_vars:
+        # Fallback: check DB for agent dynamic vars
+        from db import is_configured as db_configured
+        if db_configured():
+            from db import get_db
+            try:
+                result = get_db().table("agents").select("dynamic_vars").eq("agent_id", agent_id).limit(1).execute()
+                if result.data:
+                    dynamic_vars = result.data[0].get("dynamic_vars", {}) or {}
+            except Exception:
+                pass
 
     try:
         payload = {

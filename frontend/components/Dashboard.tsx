@@ -31,7 +31,7 @@ function loadFromStorage<T>(key: string, fallback: T): T {
   return fallback;
 }
 
-export default function Dashboard({ onLogout }: { onLogout: () => void }) {
+export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: () => void; campaignId?: number; onBack?: () => void }) {
   const [tab, setTab] = useState<Tab>("activity");
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [pipelineState, setPipelineState] = useState<Record<string, unknown> | null>(null);
@@ -46,7 +46,12 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
     const savedSession = loadFromStorage<string | null>("sessionId", null);
     if (savedSession) setSessionId(savedSession);
 
-    fetch(`${API}/api/state`)
+    // Use campaign-scoped state if we have a campaignId
+    const stateUrl = campaignId
+      ? `${API}/api/campaigns/${campaignId}/state`
+      : `${API}/api/state`;
+
+    fetch(stateUrl)
       .then((r) => r.json())
       .then((state) => {
         if (state && (state.business_analysis || state.leads?.length)) {
@@ -58,22 +63,25 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
 
     // If we have a URL from onboarding but no analysis yet, auto-start
     const savedUrl = loadFromStorage<string>("url", "");
-    if (savedUrl && !savedSession) {
+    if (savedUrl && !savedSession && !campaignId) {
       startAnalysis(savedUrl);
     }
-  }, []);
+  }, [campaignId]);
 
   // Poll state every 5s while running
   useEffect(() => {
     if (!running) return;
+    const stateUrl = campaignId
+      ? `${API}/api/campaigns/${campaignId}/state`
+      : `${API}/api/state`;
     const interval = setInterval(() => {
-      fetch(`${API}/api/state`)
+      fetch(stateUrl)
         .then((r) => r.json())
         .then((state) => setPipelineState(state))
         .catch(() => {});
     }, 5000);
     return () => clearInterval(interval);
-  }, [running]);
+  }, [running, campaignId]);
 
   // SSE stream reader
   const readStream = useCallback(async (response: Response) => {
@@ -108,7 +116,8 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
             setEvents((prev) => [...prev, event]);
 
             if (event.type === "tool_result") {
-              fetch(`${API}/api/state`)
+              const su = campaignId ? `${API}/api/campaigns/${campaignId}/state` : `${API}/api/state`;
+              fetch(su)
                 .then((r) => r.json())
                 .then((state) => setPipelineState(state))
                 .catch(() => {});
@@ -121,7 +130,8 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
 
       if (gotComplete) {
         setPipelineComplete(true);
-        fetch(`${API}/api/state`)
+        const su = campaignId ? `${API}/api/campaigns/${campaignId}/state` : `${API}/api/state`;
+        fetch(su)
           .then((r) => r.json())
           .then((state) => setPipelineState(state))
           .catch(() => {});
@@ -233,6 +243,13 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
     <div className="flex flex-col h-screen bg-[#0a0a0f]">
       {/* Header */}
       <header className="border-b border-zinc-800 px-6 py-3 flex items-center gap-4 bg-[#0d0d14]">
+        {onBack ? (
+          <button onClick={onBack} className="text-zinc-500 hover:text-zinc-300 mr-1" title="Back to campaigns">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+          </button>
+        ) : null}
         <h1 className="text-lg font-bold text-emerald-400 tracking-tight">GRAI</h1>
         <span className="text-xs text-zinc-500">{businessName}</span>
 
