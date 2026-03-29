@@ -1,4 +1,4 @@
-"""All tool functions for LeadCall AI agents, with Orq AI tracing + SQLite persistence.
+"""All tool functions for LeadCall AI agents, with Orq AI tracing + DB persistence.
 
 Integrations:
 - Firecrawl (multi-page crawl) with BS4 fallback
@@ -7,12 +7,19 @@ Integrations:
 - ElevenLabs Conversational AI (agent creation with dynamic variables)
 - Twilio (outbound calls via webhook)
 - Orq AI (@traced on every tool)
-- SQLite (persistent storage)
+- PostgreSQL/SQLite persistence
+
+Security:
+- SSRF prevention on all URL crawling (security.is_safe_url)
+- E.164 phone validation before calls (security.validate_phone_number)
+- No internal errors exposed to clients
+- PII redacted in logs
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -24,6 +31,10 @@ import httpx
 import requests
 from bs4 import BeautifulSoup
 from orq_ai_sdk.traced import traced, current_span
+
+from security import is_safe_url, validate_phone_number, sanitize_phone_for_log
+
+logger = logging.getLogger(__name__)
 
 
 def _retry_request(method: str, url: str, max_retries: int = 3, **kwargs) -> requests.Response:
@@ -104,6 +115,10 @@ def crawl_website(url: str, max_pages: int = 10) -> dict:
     """
     if not url.startswith("http"):
         url = "https://" + url
+
+    # SSRF protection: validate URL before any HTTP request
+    if not is_safe_url(url):
+        return {"status": "error", "error": "URL not allowed. Only public HTTP(S) URLs are accepted."}
 
     # Create a campaign in the DB
     cid = create_campaign(url)
@@ -332,7 +347,7 @@ def search_leads_brave(query: str, country: str = "US", language: str = "en", co
     """Searches for potential business leads using Brave Search API.
 
     Args:
-        query: Search query based on the ICP (e.g. "food processing companies Bucharest")
+        query: Search query based on the ICP (e.g. "food processing companies near me")
         country: 2-letter country code (e.g. "RO", "US", "DE")
         language: 2-letter language code (e.g. "en", "ro", "de")
         count: Number of results to return (max 20)
@@ -383,7 +398,8 @@ def search_leads_brave(query: str, country: str = "US", language: str = "en", co
 
         return {"status": "success", "source": "brave", "count": len(results), "results": results}
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        logger.error("Tool error: %s", e)
+        return {"status": "error", "error": "Operation failed. Check logs for details."}
 
 
 @traced(type="tool", name="search_leads_google_maps")
@@ -401,9 +417,9 @@ def search_leads_google_maps(
     Use this for finding leads in a specific geographic area.
 
     Args:
-        query: Search query (e.g. "restaurants in Bucharest" or "manufacturing companies")
-        location_lat: Latitude of search center (e.g. 44.4268 for Bucharest)
-        location_lng: Longitude of search center (e.g. 26.1025 for Bucharest)
+        query: Search query (e.g. "edtech companies London" or "manufacturing companies")
+        location_lat: Latitude of search center (0.0 = no location bias)
+        location_lng: Longitude of search center (0.0 = no location bias)
         radius_meters: Search radius in meters (default 10000 = 10km, max 50000)
         region_code: 2-letter country code (e.g. "ro", "us", "de")
         language_code: Language for results (e.g. "en", "ro")
@@ -418,8 +434,8 @@ def search_leads_google_maps(
             "source": "mock",
             "note": "No GOOGLE_API_KEY — returning mock data",
             "places": [
-                {"name": f"Mock Business 1 for: {query}", "address": "123 Main St", "phone": "+40700000001", "website": "https://mock-biz-1.com", "rating": 4.5, "reviews": 120},
-                {"name": f"Mock Business 2 for: {query}", "address": "456 Oak Ave", "phone": "+40700000002", "website": "https://mock-biz-2.com", "rating": 4.2, "reviews": 85},
+                {"name": f"Mock Business 1 for: {query}", "address": "123 Main St", "phone": "+15551234001", "website": "https://mock-biz-1.com", "rating": 4.5, "reviews": 120},
+                {"name": f"Mock Business 2 for: {query}", "address": "456 Oak Ave", "phone": "+15551234002", "website": "https://mock-biz-2.com", "rating": 4.2, "reviews": 85},
             ],
         }
 
@@ -487,7 +503,8 @@ def search_leads_google_maps(
 
         return {"status": "success", "source": "google_maps", "count": len(places), "places": places}
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        logger.error("Tool error: %s", e)
+        return {"status": "error", "error": "Operation failed. Check logs for details."}
 
 
 @traced(type="tool", name="save_leads")
@@ -998,7 +1015,8 @@ RULES:
 
         return {"status": "success", "agent_id": agent_id, "dynamic_variables": dynamic_variables}
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        logger.error("Tool error: %s", e)
+        return {"status": "error", "error": "Operation failed. Check logs for details."}
 
 
 @traced(type="tool", name="make_outbound_call")
@@ -1022,10 +1040,14 @@ def make_outbound_call(agent_id: str, phone_number: str, dynamic_variables_json:
     twilio_token = os.getenv("TWILIO_AUTH_TOKEN", "")
     twilio_number = os.getenv("TWILIO_PHONE_NUMBER", "")
 
+    # Validate phone number (E.164 format, no emergency/premium numbers)
+    if not validate_phone_number(phone_number):
+        return {"status": "error", "error": "Invalid phone number. Must be E.164 format (e.g., +40712345678)."}
+
     # TEST MODE: Override destination number if TEST_PHONE_OVERRIDE is set
     test_override = os.getenv("TEST_PHONE_OVERRIDE", "")
     if test_override:
-        print(f"[TEST MODE] Redirecting call from {phone_number} -> {test_override}")
+        logger.info("TEST MODE: Redirecting call to test number")
         phone_number = test_override
 
     # Merge stored dynamic vars for this agent with any overrides
@@ -1131,9 +1153,11 @@ def make_outbound_call(agent_id: str, phone_number: str, dynamic_variables_json:
 
             return {"status": "success", **call_info}
         except Exception as e:
-            return {"status": "error", "error": str(e)}
+            logger.error("Tool error: %s", e)
+        return {"status": "error", "error": "Operation failed. Check logs for details."}
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        logger.error("Tool error: %s", e)
+        return {"status": "error", "error": "Operation failed. Check logs for details."}
 
 
 @traced(type="tool", name="get_call_status")
@@ -1249,7 +1273,8 @@ def get_call_status(agent_id: str) -> dict:
             "calls": detailed_calls,
         }
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        logger.error("Tool error: %s", e)
+        return {"status": "error", "error": "Operation failed. Check logs for details."}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1294,16 +1319,22 @@ def get_preferences() -> dict:
 
 @traced(type="tool", name="get_pipeline_state")
 def get_pipeline_state() -> dict:
-    """Gets the full current pipeline state for review.
+    """Gets the full current pipeline state including all leads and pitches.
 
     Returns:
-        dict with business_analysis, leads, pitches, judged_pitches, preferences
+        dict with business_analysis, scored_leads (full data), pitches, preferences, and counts
     """
+    scored = pipeline_state.get("scored_leads", [])
+    leads = pipeline_state.get("leads", [])
+    # Return scored leads if available, otherwise raw leads
+    lead_data = scored if scored else leads
+
     return {
         "status": "success",
         "business_analysis": pipeline_state["business_analysis"],
-        "leads_count": len(pipeline_state["leads"]),
-        "scored_leads_count": len(pipeline_state["scored_leads"]),
+        "scored_leads": lead_data,
+        "leads_count": len(lead_data),
+        "pitches": pipeline_state["pitches"],
         "pitches_count": len(pipeline_state["pitches"]),
         "judged_pitches_count": len(pipeline_state["judged_pitches"]),
         "preferences": pipeline_state["preferences"],
@@ -1590,3 +1621,94 @@ def get_voice_agent_config() -> dict:
         "call_style": voice_config.get("call_style") or prefs.get("call_style", "professional"),
         "objective": voice_config.get("objective") or prefs.get("objective", ""),
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 7. EMAIL OUTREACH TOOLS — Resend integration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@traced(type="tool", name="send_email")
+def send_email(
+    to_email: str,
+    from_email: str,
+    subject: str,
+    body_html: str,
+    lead_name: str = "",
+    campaign_id_override: int = 0,
+) -> dict:
+    """Sends a personalized outreach email via Resend API.
+
+    IMPORTANT: The from_email domain must be verified in Resend AND
+    the user must have verified domain ownership in LeadCall.
+
+    Args:
+        to_email: Recipient email address
+        from_email: Sender email (must be from a verified domain)
+        subject: Email subject line
+        body_html: HTML email body
+        lead_name: Name of the lead (for tracking)
+        campaign_id_override: Override campaign ID (0 = use current)
+
+    Returns:
+        dict with status and email delivery ID
+    """
+    resend_key = os.getenv("RESEND_API_KEY", "")
+
+    cid = campaign_id_override or _campaign_id()
+
+    if not resend_key:
+        # Mock mode
+        from db import save_email_outreach
+        email_id = save_email_outreach(cid, {
+            "to_email": to_email,
+            "from_email": from_email,
+            "subject": subject,
+            "body_html": body_html,
+            "status": "mock_sent",
+        })
+        return {
+            "status": "success",
+            "mode": "mock",
+            "email_id": email_id,
+            "message": f"Mock email sent to {to_email}",
+        }
+
+    try:
+        resp = httpx.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {resend_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": from_email,
+                "to": [to_email],
+                "subject": subject,
+                "html": body_html,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        resend_id = data.get("id", "")
+
+        from db import save_email_outreach, update_email_status
+        email_id = save_email_outreach(cid, {
+            "to_email": to_email,
+            "from_email": from_email,
+            "subject": subject,
+            "body_html": body_html,
+            "status": "sent",
+        })
+        if resend_id:
+            update_email_status(email_id, "sent", resend_id)
+
+        return {
+            "status": "success",
+            "email_id": email_id,
+            "resend_id": resend_id,
+            "message": f"Email sent to {to_email}",
+        }
+    except Exception as e:
+        logger.error("Email send error: %s", e)
+        return {"status": "error", "error": "Failed to send email. Check configuration."}

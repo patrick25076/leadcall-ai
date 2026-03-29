@@ -34,3 +34,13 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Market research (generated)
+AI_SDR_Market_Research.md
+Phone_Number_Setup_Research.md
+
+# Sentry
+.env.sentry-build-plugin

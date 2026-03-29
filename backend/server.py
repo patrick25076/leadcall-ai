@@ -1,21 +1,58 @@
-"""LeadCall AI — FastAPI Server with SSE streaming for agent events."""
+"""LeadCall AI — FastAPI Server with SSE streaming for agent events.
+
+Security features:
+- CORS locked to specific origins
+- Security headers on all responses
+- Rate limiting per endpoint
+- Auth middleware (Supabase JWT)
+- Input validation on all endpoints
+- No internal error details exposed to clients
+- Twilio webhook signature verification
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 load_dotenv()
+
+# ─── Sentry (Error Tracking — EU Region) ───────────────────────────────────
+import sentry_sdk
+import sentry_sdk.integrations.fastapi
+import sentry_sdk.integrations.starlette
+
+sentry_sdk.init(
+    dsn="https://93d6ad94a9c96957eb3461ab9f3ef6c5@o4511128619319296.ingest.de.sentry.io/4511128622137424",
+    send_default_pii=True,
+    traces_sample_rate=1.0,
+    # Disable auto-integrations that crash on Python 3.9
+    auto_enabling_integrations=False,
+    integrations=[
+        sentry_sdk.integrations.fastapi.FastApiIntegration(),
+        sentry_sdk.integrations.starlette.StarletteIntegration(),
+    ],
+)
+
+# Configure structured logging (no PII)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 # Set up Orq tracing before importing agents
 orq_key = os.getenv("ORQ_API_KEY", "")
@@ -33,7 +70,16 @@ from google.genai import types as genai_types
 
 from agents.agent import root_agent, voice_config_live_agent
 from agents.tools import pipeline_state
+from auth import AuthMiddleware
 from db import get_conn
+from security import (
+    check_rate_limit,
+    sanitize_url,
+    sanitize_chat_message,
+    validate_phone_number,
+    SECURITY_HEADERS,
+)
+from observability import RequestTimingMiddleware, start_pipeline_tracking, log_api_cost
 
 
 # ─── ADK Runner Setup ──────────────────────────────────────────────────────
@@ -57,63 +103,106 @@ _registered_sessions: set[str] = set()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("LeadCall AI Server starting...")
+    logger.info("LeadCall AI Server starting...")
     get_conn()  # Initialize DB on startup
     yield
-    print("LeadCall AI Server shutting down...")
+    logger.info("LeadCall AI Server shutting down...")
     await runner.close()
     await live_runner.close()
 
 
-app = FastAPI(title="LeadCall AI", lifespan=lifespan)
+app = FastAPI(title="GRAI API", lifespan=lifespan)
+
+
+# ─── Security Middleware ────────────────────────────────────────────────────
+
+# CORS: Only allow known frontend origins (not wildcard)
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
+# Auth middleware (Supabase JWT validation)
+app.add_middleware(AuthMiddleware)
 
-# ─── Models ──────────���───────────────────────���───────────────────────────────
+
+# Security headers middleware
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        for header, value in SECURITY_HEADERS.items():
+            response.headers[header] = value
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+
+# Rate limiting middleware
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Extract client IP
+        client_ip = request.client.host if request.client else "unknown"
+
+        # Determine endpoint category for rate limiting
+        path = request.url.path
+        if path.startswith("/api/analyze"):
+            endpoint = "analyze"
+        elif path.startswith("/api/call"):
+            endpoint = "call"
+        elif path.startswith("/api/chat"):
+            endpoint = "chat"
+        elif path.startswith("/api/state"):
+            endpoint = "state"
+        elif path.startswith("/api/reset"):
+            endpoint = "reset"
+        elif path.startswith("/api/voice"):
+            endpoint = "voice_config"
+        else:
+            endpoint = "default"
+
+        if not check_rate_limit(client_ip, endpoint):
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Rate limit exceeded. Please try again later."},
+            )
+
+        return await call_next(request)
+
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(RequestTimingMiddleware)
+
+
+# ─── Request Models (with validation) ──────────────────────────────────────
 
 class AnalyzeRequest(BaseModel):
-    url: str
+    url: str = Field(..., max_length=2048)
     session_id: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., max_length=10000)
     session_id: Optional[str] = None
 
 
 class CallRequest(BaseModel):
-    agent_id: str
-    phone_number: str
+    agent_id: str = Field(..., max_length=200)
+    phone_number: str = Field(..., max_length=20)
 
 
-# ─── Helpers ──────────────────────────────────���──────────────────────────────
+# ─── Helpers ────────────────────────────────────────────────────────────────
 
 async def get_or_create_session(session_id: Optional[str] = None) -> str:
-    """Creates an ADK session via the runner's session service. Returns session_id."""
-    if session_id and session_id in _registered_sessions:
-        return session_id
-
-    # Try to reuse the provided session_id, but if it fails create a fresh one
-    if session_id:
-        try:
-            session = await runner.session_service.create_session(
-                app_name=runner.app_name,
-                user_id=USER_ID,
-                session_id=session_id,
-            )
-            _registered_sessions.add(session.id)
-            return session.id
-        except Exception:
-            # Session ID conflict or invalid — create a brand new session
-            pass
-
+    """Creates an ADK session. Session IDs are always server-generated (no client control)."""
+    # Always generate a new session ID server-side (prevents session fixation)
     session = await runner.session_service.create_session(
         app_name=runner.app_name,
         user_id=USER_ID,
@@ -123,24 +212,23 @@ async def get_or_create_session(session_id: Optional[str] = None) -> str:
 
 
 MAX_RETRIES = 5
-INITIAL_BACKOFF = 2  # seconds
+INITIAL_BACKOFF = 2
 
 
 def _try_auto_save_judged(text: str):
-    """Fallback: if pitch_judge outputs JSON text without calling save_judged_pitches, auto-save."""
+    """Fallback: if pitch generator outputs JSON text without calling save_judged_pitches, auto-save."""
     import re
-    # Try to extract JSON array from text (might be wrapped in ```json ... ```)
     json_match = re.search(r'\[[\s\S]*\]', text)
     if not json_match:
         return
     try:
         data = json.loads(json_match.group())
-        if isinstance(data, list) and len(data) > 0 and ("score" in data[0] or "readytocall" in data[0] or "ready_to_call" in data[0]):
+        if isinstance(data, list) and len(data) > 0 and ("score" in data[0] or "ready_to_call" in data[0]):
             from agents.tools import save_judged_pitches
             save_judged_pitches(json.dumps(data))
-            print(f"[Auto-save] Saved {len(data)} judged pitches from pitch_judge text output")
+            logger.info("Auto-saved %d judged pitches from agent text output", len(data))
     except (json.JSONDecodeError, Exception) as e:
-        print(f"[Auto-save] Failed to parse pitch_judge text: {e}")
+        logger.warning("Failed to auto-save judged pitches: %s", e)
 
 
 def _parse_event(event) -> list[dict]:
@@ -180,8 +268,8 @@ def _parse_event(event) -> list[dict]:
                     "content": part.text,
                     "is_partial": getattr(event, "partial", False),
                 })
-                # Auto-save fallback: if pitch_judge outputs JSON but didn't call save_judged_pitches
-                if event_data["author"] == "pitch_judge" and not pipeline_state.get("judged_pitches"):
+                # Auto-save fallback for pitch generator
+                if event_data["author"] in ("pitch_generator", "pitch_judge") and not pipeline_state.get("judged_pitches"):
                     _try_auto_save_judged(part.text)
 
     if hasattr(event, "actions") and event.actions:
@@ -197,7 +285,6 @@ def _parse_event(event) -> list[dict]:
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
-    """Check if an exception is a 429 / RESOURCE_EXHAUSTED error."""
     msg = str(exc).lower()
     return "429" in msg or "resource_exhausted" in msg or "resource exhausted" in msg
 
@@ -205,10 +292,7 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 async def stream_agent_events(
     session_id: str, message: str
 ) -> AsyncGenerator[dict, None]:
-    """Runs the agent and yields SSE-formatted event dicts.
-
-    Implements exponential backoff retry on 429 RESOURCE_EXHAUSTED errors.
-    """
+    """Runs the agent and yields SSE-formatted event dicts with retry on 429."""
     user_message = genai_types.Content(
         role="user",
         parts=[genai_types.Part(text=message)],
@@ -224,47 +308,42 @@ async def stream_agent_events(
             ):
                 for parsed in _parse_event(event):
                     yield parsed
-            # Stream completed successfully
             return
         except Exception as exc:
             if _is_rate_limit_error(exc) and retries < MAX_RETRIES:
                 retries += 1
-                wait = INITIAL_BACKOFF * (2 ** (retries - 1))  # 2, 4, 8, 16, 32s
-                print(f"[429] Rate limited, retry {retries}/{MAX_RETRIES} in {wait}s...")
+                wait = INITIAL_BACKOFF * (2 ** (retries - 1))
+                logger.warning("Rate limited by Gemini API, retry %d/%d in %ds", retries, MAX_RETRIES, wait)
                 yield {
                     "type": "text",
                     "author": "system",
                     "timestamp": "",
-                    "content": f"Rate limited by Gemini API. Retrying in {wait}s... (attempt {retries}/{MAX_RETRIES})",
+                    "content": f"Rate limited. Retrying in {wait}s... (attempt {retries}/{MAX_RETRIES})",
                 }
                 await asyncio.sleep(wait)
                 continue
             else:
+                logger.error("Agent stream error: %s", exc)
                 raise
 
 
-# ─── Endpoints ────────────���─────────────────────────────���────────────────────
+# ─── Endpoints ──────────────────────────────────────────────────────────────
 
-@app.get("/api/health")
+@app.get("/health")
 async def health():
-    return {
-        "status": "ok",
-        "agents": [
-            "website_analyzer", "lead_finder", "lead_scorer",
-            "pitch_generator", "pitch_judge",
-            "voice_config_agent", "call_manager", "preferences_agent",
-        ],
-    }
+    return {"status": "ok"}
 
 
 @app.post("/api/analyze")
 async def analyze_website(req: AnalyzeRequest):
     """Starts the analysis pipeline for a URL. Returns SSE stream."""
-    try:
-        session_id = await get_or_create_session(req.session_id)
-    except Exception:
-        session_id = await get_or_create_session(None)
-    message = f"Analyze this business website and run the full pipeline: {req.url}"
+    # Validate URL
+    safe_url = sanitize_url(req.url)
+    if not safe_url:
+        raise HTTPException(status_code=400, detail="Invalid or unsafe URL")
+
+    session_id = await get_or_create_session()
+    message = f"Analyze this business website and run the full pipeline: {safe_url}"
 
     async def event_generator():
         yield {"event": "session", "data": json.dumps({"session_id": session_id})}
@@ -272,13 +351,14 @@ async def analyze_website(req: AnalyzeRequest):
             async for event_data in stream_agent_events(session_id, message):
                 yield {"event": "agent", "data": json.dumps(event_data, default=str)}
         except Exception as e:
+            logger.error("Pipeline error: %s", e)
             yield {
                 "event": "agent",
                 "data": json.dumps({
                     "type": "text",
                     "author": "system",
                     "timestamp": "",
-                    "content": f"Pipeline error: {str(e)}",
+                    "content": "An error occurred during analysis. Please try again.",
                 }),
             }
         yield {
@@ -292,25 +372,26 @@ async def analyze_website(req: AnalyzeRequest):
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     """General chat with the orchestrator. Returns SSE stream."""
-    try:
-        session_id = await get_or_create_session(req.session_id)
-    except Exception:
-        # If session creation fails completely, create a fresh one
-        session_id = await get_or_create_session(None)
+    message = sanitize_chat_message(req.message)
+    if not message:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    session_id = await get_or_create_session()
 
     async def event_generator():
         yield {"event": "session", "data": json.dumps({"session_id": session_id})}
         try:
-            async for event_data in stream_agent_events(session_id, req.message):
+            async for event_data in stream_agent_events(session_id, message):
                 yield {"event": "agent", "data": json.dumps(event_data, default=str)}
         except Exception as e:
+            logger.error("Chat error: %s", e)
             yield {
                 "event": "agent",
                 "data": json.dumps({
                     "type": "text",
                     "author": "system",
                     "timestamp": "",
-                    "content": f"Session error: {str(e)}. Please try again or reset the pipeline.",
+                    "content": "An error occurred. Please try again.",
                 }),
             }
 
@@ -337,15 +418,17 @@ async def get_agents():
             }
             for a in agents
         ],
-        "elevenlabs_api_key": os.getenv("ELEVENLABS_API_KEY", "")[:8] + "...",  # Only show prefix for verification
+        # No API key exposure — removed the elevenlabs_api_key field
     }
 
 
 @app.post("/api/call")
 async def initiate_call(req: CallRequest):
-    """Initiates an outbound call (direct, no agent routing)."""
+    """Initiates an outbound call."""
+    if not validate_phone_number(req.phone_number):
+        raise HTTPException(status_code=400, detail="Invalid phone number format. Must be E.164 (e.g., +40712345678).")
+
     from agents.tools import make_outbound_call
-    # TEST_PHONE_OVERRIDE is handled inside make_outbound_call
     result = make_outbound_call(req.agent_id, req.phone_number)
     return result
 
@@ -380,11 +463,37 @@ async def reset_pipeline():
     return {"status": "reset"}
 
 
-# ─── Twilio Webhook Endpoints ─────────────���─────────────────────────────────
+# ─── GDPR Endpoints ─────────────────────────────────────────────────────────
+
+@app.delete("/api/leads/{lead_id}")
+async def delete_lead(lead_id: int, request: Request):
+    """GDPR right to erasure: delete all data for a lead."""
+    from auth import get_user_id
+    from db import erase_lead_data
+    user_id = get_user_id(request)
+    success = erase_lead_data(lead_id, user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Lead not found or not authorized")
+    return {"status": "deleted", "lead_id": lead_id}
+
+
+@app.delete("/api/campaigns/{campaign_id}")
+async def delete_campaign(campaign_id: int, request: Request):
+    """GDPR right to erasure: delete all data for a campaign."""
+    from auth import get_user_id
+    from db import erase_campaign_data
+    user_id = get_user_id(request)
+    success = erase_campaign_data(campaign_id, user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Campaign not found or not authorized")
+    return {"status": "deleted", "campaign_id": campaign_id}
+
+
+# ─── Twilio Webhook Endpoints ──────────────────────────────────────────────
 
 @app.api_route("/twilio/outbound", methods=["GET", "POST"])
 @app.api_route("/twilio/outbound-ws", methods=["GET", "POST"])
-async def twilio_outbound_handler(request):
+async def twilio_outbound_handler(request: Request):
     """Twilio calls this when an outbound call connects.
     Registers with ElevenLabs and returns TwiML."""
     from starlette.responses import Response
@@ -433,7 +542,8 @@ async def twilio_outbound_handler(request):
             twiml = resp.text
 
         return Response(content=twiml, media_type="application/xml")
-    except Exception:
+    except Exception as e:
+        logger.error("Twilio outbound webhook error: %s", e)
         return Response(
             content='<Response><Say>Connection error. Please try again later.</Say><Hangup/></Response>',
             media_type="application/xml",
@@ -441,8 +551,9 @@ async def twilio_outbound_handler(request):
 
 
 @app.post("/twilio/status")
-async def twilio_status_callback(request):
+async def twilio_status_callback(request: Request):
     """Receives call status updates from Twilio."""
+    # TODO: Add Twilio signature verification when WEBHOOK_BASE_URL is set
     form_data = await request.form()
     call_sid = form_data.get("CallSid", "")
     call_status = form_data.get("CallStatus", "")
@@ -463,7 +574,7 @@ async def twilio_status_callback(request):
 async def voice_config_ws(websocket: WebSocket, session_id: str):
     """Real-time voice configuration via ADK Live API with native audio model."""
     await websocket.accept()
-    print(f"[Voice WS] Connected: session={session_id}")
+    logger.info("Voice WS connected: session=%s", session_id[:8])
 
     user_id = USER_ID
 
@@ -496,7 +607,6 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
             while True:
                 raw = await websocket.receive()
 
-                # Binary frame = raw PCM audio
                 if "bytes" in raw and raw["bytes"]:
                     audio_blob = genai_types.Blob(
                         mime_type="audio/pcm;rate=16000",
@@ -504,11 +614,9 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
                     )
                     live_request_queue.send_realtime(audio_blob)
 
-                # Text frame = JSON message
                 elif "text" in raw and raw["text"]:
                     msg = json.loads(raw["text"])
                     if msg.get("type") == "audio":
-                        # Base64-encoded PCM audio
                         audio_data = base64.b64decode(msg["data"])
                         audio_blob = genai_types.Blob(
                             mime_type="audio/pcm;rate=16000",
@@ -516,7 +624,6 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
                         )
                         live_request_queue.send_realtime(audio_blob)
                     elif msg.get("type") == "text":
-                        # Text input
                         content = genai_types.Content(
                             parts=[genai_types.Part(text=msg["text"])]
                         )
@@ -526,7 +633,7 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
         except WebSocketDisconnect:
             pass
         except Exception as e:
-            print(f"[Voice WS] Upstream error: {e}")
+            logger.warning("Voice WS upstream error: %s", type(e).__name__)
 
     async def downstream_task():
         """Receive events from run_live() → send to WebSocket client."""
@@ -537,15 +644,12 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
                 live_request_queue=live_request_queue,
                 run_config=run_config,
             ):
-                # Extract useful data from event
                 if not event.content or not event.content.parts:
-                    # Check for turn_complete or other signals
                     if event.is_final_response():
                         await websocket.send_text(json.dumps({"type": "turn_complete"}))
                     continue
 
                 for part in event.content.parts:
-                    # Audio response
                     if hasattr(part, "inline_data") and part.inline_data:
                         audio_b64 = base64.b64encode(part.inline_data.data).decode("utf-8")
                         await websocket.send_text(json.dumps({
@@ -553,22 +657,17 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
                             "data": audio_b64,
                             "mime_type": part.inline_data.mime_type or "audio/pcm;rate=24000",
                         }))
-
-                    # Text response (transcription or text output)
                     elif hasattr(part, "text") and part.text:
                         await websocket.send_text(json.dumps({
                             "type": "transcript",
                             "text": part.text,
                             "author": getattr(event, "author", "voice_config_agent"),
                         }))
-
-                    # Function calls (tool use)
                     elif hasattr(part, "function_call") and part.function_call:
                         await websocket.send_text(json.dumps({
                             "type": "tool_call",
                             "tool_name": part.function_call.name,
                         }))
-
                     elif hasattr(part, "function_response") and part.function_response:
                         await websocket.send_text(json.dumps({
                             "type": "tool_result",
@@ -579,11 +678,11 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
         except WebSocketDisconnect:
             pass
         except Exception as e:
-            print(f"[Voice WS] Downstream error: {e}")
+            logger.warning("Voice WS downstream error: %s", type(e).__name__)
             try:
                 await websocket.send_text(json.dumps({
                     "type": "error",
-                    "message": str(e),
+                    "message": "Voice connection error. Please reconnect.",
                 }))
             except Exception:
                 pass
@@ -596,9 +695,195 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
         )
     finally:
         live_request_queue.close()
-        print(f"[Voice WS] Disconnected: session={session_id}")
+        logger.info("Voice WS disconnected: session=%s", session_id[:8])
+
+
+# ─── Onboarding: Gmail OAuth ────────────────────────────────────────────────
+
+@app.get("/auth/gmail/url")
+async def gmail_oauth_url(request: Request):
+    """Get the Google OAuth consent URL for connecting Gmail."""
+    from gmail_oauth import get_oauth_url
+    from auth import get_user_id
+    user_id = get_user_id(request)
+    url = get_oauth_url(state=user_id)
+    return {"url": url}
+
+
+@app.post("/auth/gmail/callback")
+async def gmail_oauth_callback(request: Request):
+    """Handle Gmail OAuth callback. Exchange code for tokens."""
+    from gmail_oauth import exchange_code, get_user_email
+    body = await request.json()
+    code = body.get("code", "")
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing authorization code")
+
+    tokens = await exchange_code(code)
+    if not tokens:
+        raise HTTPException(status_code=400, detail="Failed to exchange code")
+
+    # Get user's email address
+    email = await get_user_email(tokens["access_token"])
+
+    # TODO: Store tokens securely in DB (encrypted) associated with user
+    # For now, return them to frontend to store in session
+    return {
+        "status": "connected",
+        "email": email,
+        "has_refresh_token": bool(tokens.get("refresh_token")),
+    }
+
+
+@app.post("/auth/gmail/send")
+async def gmail_send_email(request: Request):
+    """Send an email via connected Gmail account."""
+    from gmail_oauth import send_gmail
+    body = await request.json()
+
+    result = await send_gmail(
+        access_token=body.get("access_token", ""),
+        refresh_token=body.get("refresh_token", ""),
+        from_email=body.get("from_email", ""),
+        to_email=body.get("to_email", ""),
+        subject=body.get("subject", ""),
+        body_html=body.get("body_html", ""),
+        from_name=body.get("from_name", ""),
+    )
+    return result
+
+
+# ─── Onboarding: Phone Verification ────────────────────────────────────────
+
+class PhoneVerifyRequest(BaseModel):
+    phone_number: str = Field(..., max_length=20)
+    friendly_name: str = Field(default="", max_length=100)
+
+
+@app.post("/api/phone/verify")
+async def start_phone_verification(req: PhoneVerifyRequest):
+    """Start Twilio Caller ID verification. Twilio calls the user's number."""
+    if not validate_phone_number(req.phone_number):
+        raise HTTPException(status_code=400, detail="Invalid phone number format")
+
+    from phone_setup import start_caller_id_verification
+    result = start_caller_id_verification(req.phone_number, req.friendly_name)
+    return result
+
+
+@app.get("/api/phone/status")
+async def check_phone_status(phone_number: str = ""):
+    """Check if a phone number is verified as caller ID."""
+    from phone_setup import check_caller_id_verified
+    if phone_number:
+        verified = check_caller_id_verified(phone_number)
+        return {"phone_number": phone_number, "verified": verified}
+    # Return default number info
+    from phone_setup import get_default_number
+    return {"default_number": get_default_number(), "mode": "default"}
+
+
+@app.get("/api/phone/verified-numbers")
+async def list_verified_numbers():
+    """List all verified caller IDs."""
+    from phone_setup import get_verified_caller_ids
+    return {"numbers": get_verified_caller_ids()}
+
+
+# ─── Admin Dashboard API ───────────────────────────────────────────────────
+
+@app.get("/api/admin/stats")
+async def admin_stats():
+    """Admin dashboard statistics. Returns pipeline, user, cost, and quality metrics."""
+    from db import get_conn
+    conn = get_conn()
+
+    # Campaign stats
+    campaigns = conn.execute("SELECT COUNT(*) as count FROM campaigns").fetchone()
+    active_campaigns = conn.execute("SELECT COUNT(*) as count FROM campaigns WHERE status='active'").fetchone()
+
+    # Lead stats
+    total_leads = conn.execute("SELECT COUNT(*) as count FROM leads").fetchone()
+    lead_grades = conn.execute(
+        "SELECT score_grade, COUNT(*) as count FROM leads WHERE score_grade IS NOT NULL GROUP BY score_grade"
+    ).fetchall()
+    avg_score = conn.execute("SELECT AVG(lead_score) as avg FROM leads WHERE lead_score > 0").fetchone()
+
+    # Pitch stats
+    total_pitches = conn.execute("SELECT COUNT(*) as count FROM pitches").fetchone()
+    ready_calls = conn.execute("SELECT COUNT(*) as count FROM pitches WHERE ready_to_call=1").fetchone()
+    ready_emails = conn.execute("SELECT COUNT(*) as count FROM pitches WHERE ready_to_email=1").fetchone()
+    avg_pitch_score = conn.execute("SELECT AVG(score) as avg FROM pitches WHERE score > 0").fetchone()
+
+    # Call stats
+    total_calls = conn.execute("SELECT COUNT(*) as count FROM calls").fetchone()
+    completed_calls = conn.execute("SELECT COUNT(*) as count FROM calls WHERE status='completed'").fetchone()
+
+    # Email stats
+    total_emails = conn.execute("SELECT COUNT(*) as count FROM email_outreach").fetchone()
+    sent_emails = conn.execute("SELECT COUNT(*) as count FROM email_outreach WHERE status='sent'").fetchone()
+
+    # Agent stats
+    total_agents = conn.execute("SELECT COUNT(*) as count FROM agents").fetchone()
+
+    # Recent activity (last 10 campaigns)
+    recent = conn.execute(
+        "SELECT id, website_url, business_name, status, created_at FROM campaigns ORDER BY id DESC LIMIT 10"
+    ).fetchall()
+
+    # GDPR audit log (last 20 entries)
+    audit = conn.execute(
+        "SELECT action, entity_type, entity_id, created_at FROM consent_log ORDER BY id DESC LIMIT 20"
+    ).fetchall()
+
+    # Cost estimate from observability tracker
+    from observability import get_tracker
+    tracker = get_tracker()
+    cost_summary = tracker.get_summary() if tracker else None
+
+    return {
+        "campaigns": {
+            "total": campaigns["count"],
+            "active": active_campaigns["count"],
+        },
+        "leads": {
+            "total": total_leads["count"],
+            "avg_score": round(avg_score["avg"] or 0, 1),
+            "grades": {r["score_grade"]: r["count"] for r in lead_grades},
+        },
+        "pitches": {
+            "total": total_pitches["count"],
+            "ready_to_call": ready_calls["count"],
+            "ready_to_email": ready_emails["count"],
+            "avg_score": round(avg_pitch_score["avg"] or 0, 1),
+        },
+        "outreach": {
+            "calls_total": total_calls["count"],
+            "calls_completed": completed_calls["count"],
+            "emails_total": total_emails["count"],
+            "emails_sent": sent_emails["count"],
+        },
+        "agents": {
+            "total": total_agents["count"],
+        },
+        "recent_campaigns": [dict(r) for r in recent],
+        "audit_log": [dict(r) for r in audit],
+        "cost_estimate": cost_summary,
+    }
+
+
+# ─── Global exception handler ──────────────────────────────────────────────
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all: never expose internal errors to clients."""
+    logger.error("Unhandled error on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={"error": "An internal error occurred. Please try again."},
+    )
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))

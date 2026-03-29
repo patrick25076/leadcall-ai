@@ -1,6 +1,12 @@
 "use client";
 
-import type { PipelineStep } from "@/app/page";
+import type { AgentEvent } from "./Dashboard";
+
+export type PipelineStep = {
+  agent: string;
+  status: "pending" | "active" | "done" | "error";
+  events: AgentEvent[];
+};
 
 const AGENT_LABELS: Record<string, { label: string; description: string; icon: string }> = {
   website_analyzer: {
@@ -9,19 +15,20 @@ const AGENT_LABELS: Record<string, { label: string; description: string; icon: s
     icon: "🌐",
   },
   lead_finder: {
-    label: "Lead Finder",
-    description: "Google Maps + Brave Search, same city preferred",
+    label: "Lead Finder & Scorer",
+    description: "Google Maps + Brave Search, auto-scored by fit",
     icon: "🔍",
   },
+  pitch_generator: {
+    label: "Pitch & Email Generator",
+    description: "Personalized call scripts + emails, self-reviewed",
+    icon: "✍️",
+  },
+  // Legacy agent names (for backward compat with existing sessions)
   lead_scorer: {
     label: "Lead Scorer",
     description: "Scores by location, industry, size, LTV",
     icon: "📊",
-  },
-  pitch_generator: {
-    label: "Pitch Generator",
-    description: "Personalized scripts with lead names",
-    icon: "✍️",
   },
   pitch_judge: {
     label: "Pitch Judge",

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useMemo } from "react";
-import type { AgentEvent } from "@/app/page";
+import type { AgentEvent } from "./Dashboard";
 
 const AGENT_COLORS: Record<string, string> = {
   leadcall_orchestrator: "text-purple-400",

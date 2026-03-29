@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash(git:*)",
+      "Bash(cd:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(pip:*)",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(python:*)",
+      "Bash(node:*)",
+      "Bash(uvicorn:*)",
+      "Bash(wc:*)",
+      "Bash(mv:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(git push --force:*)",
+      "Bash(git reset --hard:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath // empty' | { read -r f; case \"$f\" in *.py) python -c \"import ast; ast.parse(open('$f', encoding='utf-8').read())\" 2>&1 && echo '{\"suppressOutput\": true}' || echo \"{\\\"systemMessage\\\": \\\"Python syntax error in $f\\\"}\" ;; *.ts|*.tsx) cd frontend 2>/dev/null && npx tsc --noEmit 2>&1 | head -5 | { read -r line; [ -z \"$line\" ] && echo '{\"suppressOutput\": true}' || echo \"{\\\"systemMessage\\\": \\\"TypeScript error: $line\\\"}\"; } ;; *) echo '{\"suppressOutput\": true}' ;; esac; }",
+            "timeout": 30,
+            "statusMessage": "Checking syntax..."
+          }
+        ]
+      }
+    ]
+  }
+}
