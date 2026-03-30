@@ -159,6 +159,31 @@ def get_campaign_state(campaign_id: int) -> dict:
                     })
                     judged.append(j)
 
+        # Bridge phone numbers from leads into pitch objects
+        # Leads have `phone`, pitches need `phone_number` for voice outreach
+        phone_lookup: dict[str, str] = {}
+        email_lookup: dict[str, str] = {}
+        for lead in leads_data:
+            name = lead.get("name", "")
+            if name:
+                if lead.get("phone"):
+                    phone_lookup[name] = lead["phone"]
+                if lead.get("email"):
+                    email_lookup[name] = lead["email"]
+
+        for pitch_list in (pitches, judged):
+            for p in pitch_list:
+                lead_name = p.get("lead_name", "")
+                if lead_name and not p.get("phone_number") and not p.get("phone"):
+                    phone = phone_lookup.get(lead_name, "")
+                    if phone:
+                        p["phone_number"] = phone
+                        p["phone"] = phone
+                if lead_name and not p.get("email"):
+                    email = email_lookup.get(lead_name, "")
+                    if email:
+                        p["email"] = email
+
         # Agents
         agents_result = get_db().table("agents").select("*").eq(
             "campaign_id", campaign_id
@@ -227,6 +252,19 @@ def _empty_state(campaign_id: int = 0) -> dict:
         "campaign_id": campaign_id,
         "user_id": "",
     }
+
+
+def verify_campaign_ownership(campaign_id: int, user_id: str) -> bool:
+    """Check that a campaign belongs to the given user. Returns False if not owned."""
+    if not is_configured() or not user_id:
+        return False
+    try:
+        result = get_db().table("campaigns").select("id").eq(
+            "id", campaign_id
+        ).eq("user_id", user_id).execute()
+        return bool(result.data)
+    except Exception:
+        return False
 
 
 def get_agents_for_campaign(campaign_id: int) -> list[dict]:

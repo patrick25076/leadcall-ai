@@ -39,6 +39,7 @@ Thumbs.db
 
 # Claude Code local settings
 .claude/settings.local.json
+.mcp.json
 
 # Market research (generated)
 AI_SDR_Market_Research.md

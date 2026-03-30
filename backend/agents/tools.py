@@ -572,7 +572,8 @@ def save_leads(leads_json: str) -> dict:
         # Persist to DB
         cid = _campaign_id()
         if cid:
-            save_leads_db(cid, leads)
+            user_id = pipeline_state.get("user_id", "")
+            save_leads_db(cid, leads, user_id=user_id)
 
         return {"status": "success", "count": len(leads), "leads": leads}
     except json.JSONDecodeError as e:

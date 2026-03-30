@@ -71,7 +71,7 @@ from google.genai import types as genai_types
 from agents.agent import root_agent, voice_config_live_agent, analysis_pipeline
 from agents.tools import pipeline_state, load_campaign_state, reset_pipeline_state
 from auth import AuthMiddleware
-from db import get_conn, get_campaigns_for_user, get_campaign_state, get_campaign, create_campaign as db_create_campaign
+from db import get_conn, get_campaigns_for_user, get_campaign_state, get_campaign, create_campaign as db_create_campaign, verify_campaign_ownership
 from security import (
     check_rate_limit,
     sanitize_url,
@@ -307,9 +307,18 @@ def _parse_event(event) -> list[dict]:
     return results
 
 
-def _is_rate_limit_error(exc: Exception) -> bool:
+def _is_retryable_error(exc: Exception) -> bool:
+    """Check if a Gemini API error is transient and worth retrying."""
     msg = str(exc).lower()
-    return "429" in msg or "resource_exhausted" in msg or "resource exhausted" in msg
+    # 429 = rate limit, 500/503 = transient Gemini internal errors
+    return (
+        "429" in msg
+        or "resource_exhausted" in msg
+        or "resource exhausted" in msg
+        or "500 internal" in msg
+        or "503" in msg
+        or "service unavailable" in msg
+    )
 
 
 async def stream_agent_events(
@@ -335,15 +344,15 @@ async def stream_agent_events(
                     yield parsed
             return
         except Exception as exc:
-            if _is_rate_limit_error(exc) and retries < MAX_RETRIES:
+            if _is_retryable_error(exc) and retries < MAX_RETRIES:
                 retries += 1
                 wait = INITIAL_BACKOFF * (2 ** (retries - 1))
-                logger.warning("Rate limited by Gemini API, retry %d/%d in %ds", retries, MAX_RETRIES, wait)
+                logger.warning("Retryable Gemini API error, retry %d/%d in %ds: %s", retries, MAX_RETRIES, wait, type(exc).__name__)
                 yield {
                     "type": "text",
                     "author": "system",
                     "timestamp": "",
-                    "content": f"Rate limited. Retrying in {wait}s... (attempt {retries}/{MAX_RETRIES})",
+                    "content": f"Temporary API issue. Retrying in {wait}s... (attempt {retries}/{MAX_RETRIES})",
                 }
                 await asyncio.sleep(wait)
                 continue
@@ -507,30 +516,15 @@ async def list_campaigns(request: Request):
     """List all campaigns for the authenticated user."""
     user_id = _get_user_id(request)
     campaigns = get_campaigns_for_user(user_id)
-    # Also include campaigns with no user_id (created before user tracking)
-    if not campaigns:
-        from db import is_configured, get_db
-        if is_configured():
-            try:
-                result = get_db().table("campaigns").select(
-                    "id, website_url, business_name, status, created_at, updated_at"
-                ).or_(f"user_id.eq.{user_id},user_id.is.null").order("id", desc=True).execute()
-                campaigns = result.data or []
-                # Enrich with counts
-                for c in campaigns:
-                    cid = c["id"]
-                    lr = get_db().table("leads").select("id", count="exact").eq("campaign_id", cid).execute()
-                    c["lead_count"] = lr.count if lr.count is not None else len(lr.data or [])
-                    c["pitch_count"] = 0
-                    c["agent_count"] = 0
-            except Exception:
-                pass
     return {"campaigns": campaigns}
 
 
 @app.get("/api/campaigns/{campaign_id}/state")
 async def get_campaign_state_endpoint(campaign_id: int, request: Request):
     """Get the full pipeline state for a specific campaign."""
+    user_id = _get_user_id(request)
+    if not verify_campaign_ownership(campaign_id, user_id):
+        raise HTTPException(status_code=404, detail="Campaign not found")
     state = get_campaign_state(campaign_id)
     return state
 
@@ -538,12 +532,20 @@ async def get_campaign_state_endpoint(campaign_id: int, request: Request):
 @app.get("/api/state")
 async def get_state(request: Request):
     """Returns the current pipeline state. Supports ?campaign_id=N for specific campaign."""
+    user_id = _get_user_id(request)
     campaign_id = request.query_params.get("campaign_id")
     if campaign_id:
         try:
-            return get_campaign_state(int(campaign_id))
+            cid = int(campaign_id)
+            if not verify_campaign_ownership(cid, user_id):
+                raise HTTPException(status_code=404, detail="Campaign not found")
+            return get_campaign_state(cid)
         except (ValueError, TypeError):
             pass
+    # For in-memory state, only return if it belongs to this user
+    if pipeline_state.get("user_id") and pipeline_state["user_id"] != user_id:
+        return {"leads": [], "scored_leads": [], "pitches": [], "judged_pitches": [],
+                "elevenlabs_agents": [], "call_results": [], "business_analysis": None}
     return pipeline_state
 
 
@@ -604,6 +606,9 @@ async def reset_pipeline():
 @app.post("/api/campaigns/{campaign_id}/batch-email")
 async def batch_email(campaign_id: int, request: Request):
     """Send emails to approved leads in a campaign."""
+    user_id = _get_user_id(request)
+    if not verify_campaign_ownership(campaign_id, user_id):
+        raise HTTPException(status_code=404, detail="Campaign not found")
     body = await request.json()
     lead_names: list[str] = body.get("lead_names", [])
 
@@ -660,8 +665,11 @@ async def batch_email(campaign_id: int, request: Request):
 
 
 @app.get("/api/campaigns/{campaign_id}/emails")
-async def list_emails(campaign_id: int):
+async def list_emails(campaign_id: int, request: Request):
     """List all emails for a campaign."""
+    user_id = _get_user_id(request)
+    if not verify_campaign_ownership(campaign_id, user_id):
+        raise HTTPException(status_code=404, detail="Campaign not found")
     from db import is_configured, get_db
     if not is_configured():
         return {"emails": []}
@@ -685,6 +693,9 @@ async def list_voices_endpoint(language: str = ""):
 @app.post("/api/campaigns/{campaign_id}/batch-call")
 async def batch_call(campaign_id: int, request: Request):
     """Queue batch outbound calls for approved leads with delay between calls."""
+    user_id = _get_user_id(request)
+    if not verify_campaign_ownership(campaign_id, user_id):
+        raise HTTPException(status_code=404, detail="Campaign not found")
     body = await request.json()
     lead_ids: list[int] = body.get("lead_ids", [])
     delay_seconds: int = body.get("delay_seconds", 30)
@@ -752,8 +763,11 @@ async def batch_call(campaign_id: int, request: Request):
 # ─── Analytics ─────────────────────────────────────────────────────────────
 
 @app.get("/api/campaigns/{campaign_id}/analytics")
-async def campaign_analytics(campaign_id: int):
+async def campaign_analytics(campaign_id: int, request: Request):
     """Get aggregate call analytics for a campaign."""
+    user_id = _get_user_id(request)
+    if not verify_campaign_ownership(campaign_id, user_id):
+        raise HTTPException(status_code=404, detail="Campaign not found")
     from db import get_calls_for_campaign, get_leads, is_configured
 
     if not is_configured():
@@ -973,15 +987,42 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
         response_modalities=["AUDIO"],
         input_audio_transcription=genai_types.AudioTranscriptionConfig(),
         output_audio_transcription=genai_types.AudioTranscriptionConfig(),
+        speech_config=genai_types.SpeechConfig(
+            voice_config=genai_types.VoiceConfig(
+                prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
+                    voice_name="Aoede",
+                )
+            )
+        ),
     )
 
     live_request_queue = LiveRequestQueue()
 
+    # Send an initial trigger message so the agent starts speaking first.
+    # Without this, the agent sits idle waiting for user audio input.
+    live_request_queue.send_content(
+        genai_types.Content(
+            role="user",
+            parts=[genai_types.Part(text=(
+                "The user just connected to the voice setup session. "
+                "Greet them warmly, introduce yourself, and start the voice configuration process. "
+                "Begin by calling get_pipeline_state to understand their business context."
+            ))],
+        )
+    )
+
+    # Shared flag so upstream stops when downstream dies (and vice versa)
+    _ws_closed = asyncio.Event()
+
     async def upstream_task():
         """Receive audio/text from WebSocket client → LiveRequestQueue."""
         try:
-            while True:
+            while not _ws_closed.is_set():
                 raw = await websocket.receive()
+
+                # Starlette sends {"type": "websocket.disconnect"} on close
+                if raw.get("type") == "websocket.disconnect":
+                    break
 
                 if "bytes" in raw and raw["bytes"]:
                     audio_blob = genai_types.Blob(
@@ -1008,8 +1049,13 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
                         break
         except WebSocketDisconnect:
             pass
+        except RuntimeError:
+            pass  # WebSocket already closed
         except Exception as e:
-            logger.warning("Voice WS upstream error: %s", type(e).__name__)
+            logger.warning("Voice WS upstream error: %s: %s", type(e).__name__, e)
+        finally:
+            _ws_closed.set()
+            live_request_queue.close()
 
     async def downstream_task():
         """Receive events from run_live() → send to WebSocket client."""
@@ -1020,31 +1066,52 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
                 live_request_queue=live_request_queue,
                 run_config=run_config,
             ):
-                if not event.content or not event.content.parts:
-                    if event.is_final_response():
+                # Handle transcription events (input/output speech-to-text)
+                sc = getattr(event, "server_content", None)
+                if sc is not None:
+                    input_tx = getattr(sc, "input_transcription", None)
+                    if input_tx and getattr(input_tx, "text", None):
+                        await websocket.send_text(json.dumps({
+                            "type": "transcript",
+                            "text": input_tx.text,
+                            "author": "user",
+                        }))
+                    output_tx = getattr(sc, "output_transcription", None)
+                    if output_tx and getattr(output_tx, "text", None):
+                        await websocket.send_text(json.dumps({
+                            "type": "transcript",
+                            "text": output_tx.text,
+                            "author": "voice_config_live",
+                        }))
+
+                # Safely access content and parts — some events have neither
+                content = getattr(event, "content", None)
+                parts = getattr(content, "parts", None) if content else None
+                if not parts:
+                    if hasattr(event, "is_final_response") and event.is_final_response():
                         await websocket.send_text(json.dumps({"type": "turn_complete"}))
                     continue
 
-                for part in event.content.parts:
-                    if hasattr(part, "inline_data") and part.inline_data:
+                for part in parts:
+                    if getattr(part, "inline_data", None) and part.inline_data.data:
                         audio_b64 = base64.b64encode(part.inline_data.data).decode("utf-8")
                         await websocket.send_text(json.dumps({
                             "type": "audio",
                             "data": audio_b64,
-                            "mime_type": part.inline_data.mime_type or "audio/pcm;rate=24000",
+                            "mime_type": getattr(part.inline_data, "mime_type", None) or "audio/pcm;rate=24000",
                         }))
-                    elif hasattr(part, "text") and part.text:
+                    elif getattr(part, "text", None):
                         await websocket.send_text(json.dumps({
                             "type": "transcript",
                             "text": part.text,
                             "author": getattr(event, "author", "voice_config_agent"),
                         }))
-                    elif hasattr(part, "function_call") and part.function_call:
+                    elif getattr(part, "function_call", None):
                         await websocket.send_text(json.dumps({
                             "type": "tool_call",
                             "tool_name": part.function_call.name,
                         }))
-                    elif hasattr(part, "function_response") and part.function_response:
+                    elif getattr(part, "function_response", None):
                         await websocket.send_text(json.dumps({
                             "type": "tool_result",
                             "tool_name": part.function_response.name,
@@ -1053,15 +1120,20 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
 
         except WebSocketDisconnect:
             pass
+        except RuntimeError:
+            pass  # WebSocket already closed
         except Exception as e:
-            logger.warning("Voice WS downstream error: %s", type(e).__name__)
-            try:
-                await websocket.send_text(json.dumps({
-                    "type": "error",
-                    "message": "Voice connection error. Please reconnect.",
-                }))
-            except Exception:
-                pass
+            logger.warning("Voice WS downstream error: %s: %s", type(e).__name__, e)
+            if not _ws_closed.is_set():
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "Voice connection error. Please reconnect.",
+                    }))
+                except Exception:
+                    pass
+        finally:
+            _ws_closed.set()
 
     try:
         await asyncio.gather(
@@ -1071,6 +1143,10 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
         )
     finally:
         live_request_queue.close()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
         logger.info("Voice WS disconnected: session=%s", session_id[:8])
 
 
@@ -1169,8 +1245,12 @@ async def list_verified_numbers():
 # ─── Admin Dashboard API ───────────────────────────────────────────────────
 
 @app.get("/api/admin/stats")
-async def admin_stats():
-    """Admin dashboard statistics via Supabase."""
+async def admin_stats(request: Request):
+    """Admin dashboard statistics via Supabase. Restricted to admin users."""
+    user_id = _get_user_id(request)
+    admin_ids = [uid.strip() for uid in os.getenv("ADMIN_USER_IDS", "").split(",") if uid.strip()]
+    if not admin_ids or user_id not in admin_ids:
+        raise HTTPException(status_code=403, detail="Access denied")
     from db import get_db, is_configured
     from observability import get_tracker
 
