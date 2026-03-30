@@ -234,8 +234,8 @@ async def get_or_create_session(session_id: Optional[str] = None, user_id: str =
     return session.id
 
 
-MAX_RETRIES = 5
-INITIAL_BACKOFF = 2
+MAX_RETRIES = 8
+INITIAL_BACKOFF = 3
 
 
 def _try_auto_save_judged(text: str):

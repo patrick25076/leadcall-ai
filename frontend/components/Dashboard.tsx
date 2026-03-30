@@ -84,12 +84,22 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
     return () => clearInterval(interval);
   }, [running, campaignId]);
 
-  // SSE stream reader
+  // SSE stream reader — reads events from the pipeline SSE stream
   const readStream = useCallback(async (response: Response) => {
     const reader = response.body?.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     if (!reader) return;
+
+    // Fetch latest state from the server
+    const refreshState = () => {
+      fetch(`${API}/api/state`)
+        .then((r) => r.json())
+        .then((state) => {
+          if (state) setPipelineState(state);
+        })
+        .catch(() => {});
+    };
 
     while (true) {
       const { done, value } = await reader.read();
@@ -116,12 +126,9 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
             if (event.author && event.author !== "system") setActiveAgent(event.author);
             setEvents((prev) => [...prev, event]);
 
+            // Refresh state on every tool result to show live updates
             if (event.type === "tool_result") {
-              const su = campaignId ? `${API}/api/campaigns/${campaignId}/state` : `${API}/api/state`;
-              fetch(su)
-                .then((r) => r.json())
-                .then((state) => setPipelineState(state))
-                .catch((err) => { console.error("API error:", err); setError("Connection error. Check if the backend is running."); });
+              refreshState();
             }
           } catch {}
         } else if (line.startsWith("event:")) {
@@ -131,11 +138,7 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
 
       if (gotComplete) {
         setPipelineComplete(true);
-        const su = campaignId ? `${API}/api/campaigns/${campaignId}/state` : `${API}/api/state`;
-        fetch(su)
-          .then((r) => r.json())
-          .then((state) => setPipelineState(state))
-          .catch((err) => { console.error("API error:", err); setError("Connection error. Check if the backend is running."); });
+        refreshState();
       }
     }
   }, []);

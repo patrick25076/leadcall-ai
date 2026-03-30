@@ -83,11 +83,20 @@ export default function ActivityFeed({
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-6">
         <div className="max-w-2xl mx-auto space-y-4">
 
-          {/* Welcome / Status */}
-          {events.length === 0 && !running && (
+          {/* Running but no events yet */}
+          {events.length === 0 && running && (
             <div className="text-center py-12">
-              <p className="text-zinc-400 text-lg mb-2">Your campaign is being set up</p>
-              <p className="text-zinc-600 text-sm">The AI will analyze your website and find leads automatically.</p>
+              <div className="w-10 h-10 border-2 border-emerald-500/30 border-t-emerald-500 rounded-full animate-spin mx-auto mb-4" />
+              <p className="text-zinc-300 text-lg mb-2">Analyzing your website...</p>
+              <p className="text-zinc-600 text-sm">Crawling pages, detecting business model, finding leads. This takes 1-2 minutes.</p>
+            </div>
+          )}
+
+          {/* Idle / waiting */}
+          {events.length === 0 && !running && !pipelineComplete && !analysis && (
+            <div className="text-center py-12">
+              <p className="text-zinc-400 text-lg mb-2">Ready to analyze</p>
+              <p className="text-zinc-600 text-sm">Click "Re-analyze" or enter a URL to start.</p>
             </div>
           )}
 

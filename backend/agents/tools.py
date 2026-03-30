@@ -38,16 +38,25 @@ logger = logging.getLogger(__name__)
 
 
 def _retry_request(method: str, url: str, max_retries: int = 3, **kwargs) -> requests.Response:
-    """HTTP request with exponential backoff retry on 429 and 5xx errors."""
+    """HTTP request with exponential backoff retry on 429, 5xx, and transient errors."""
     for attempt in range(max_retries + 1):
-        resp = requests.request(method, url, **kwargs)
-        if resp.status_code == 429 or resp.status_code >= 500:
+        try:
+            resp = requests.request(method, url, **kwargs)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if attempt < max_retries:
+                    wait = 2 ** (attempt + 1)  # 2, 4, 8s
+                    logger.warning("[Retry] %d from %s, waiting %ds (attempt %d/%d)",
+                                   resp.status_code, url.split("?")[0], wait, attempt + 1, max_retries)
+                    time.sleep(wait)
+                    continue
+            return resp
+        except (requests.ConnectionError, requests.Timeout) as e:
             if attempt < max_retries:
-                wait = 2 ** (attempt + 1)  # 2, 4, 8s
-                print(f"[Retry] {resp.status_code} from {url}, waiting {wait}s (attempt {attempt + 1}/{max_retries})")
+                wait = 2 ** (attempt + 1)
+                logger.warning("[Retry] Connection error for %s: %s, waiting %ds", url.split("?")[0], e, wait)
                 time.sleep(wait)
                 continue
-        return resp
+            raise
     return resp  # return last response even if failed
 
 from db import (
@@ -382,6 +391,17 @@ def search_leads_brave(query: str, country: str = "US", language: str = "en", co
         }
 
     try:
+        # Build params — only include country/lang if valid
+        params: dict = {
+            "q": query,
+            "count": min(count, 20),
+        }
+        # Brave uses 2-letter country codes but not all are valid
+        if country and len(country) == 2:
+            params["country"] = country.upper()
+        if language and len(language) == 2:
+            params["search_lang"] = language.lower()
+
         resp = _retry_request(
             "GET",
             "https://api.search.brave.com/res/v1/web/search",
@@ -390,14 +410,22 @@ def search_leads_brave(query: str, country: str = "US", language: str = "en", co
                 "Accept": "application/json",
                 "Cache-Control": "no-cache",
             },
-            params={
-                "q": query,
-                "country": country.upper(),
-                "search_lang": language.lower(),
-                "count": min(count, 20),
-            },
+            params=params,
             timeout=15,
         )
+        # Handle 422 gracefully — Brave rejects some param combos
+        if resp.status_code == 422:
+            logger.warning("Brave rejected params for query '%s' — retrying without country/lang", query[:50])
+            resp = _retry_request(
+                "GET",
+                "https://api.search.brave.com/res/v1/web/search",
+                headers={
+                    "X-Subscription-Token": brave_key,
+                    "Accept": "application/json",
+                },
+                params={"q": query, "count": min(count, 20)},
+                timeout=15,
+            )
         resp.raise_for_status()
         data = resp.json()
 
