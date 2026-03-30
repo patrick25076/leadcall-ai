@@ -127,10 +127,10 @@ Think about WHO would pay for this product/service:
 - Prefer SMBs and mid-market over huge enterprises (more likely to respond to outreach)
 
 STEP 2 — SEARCH:
-Do AT LEAST 6-8 searches across Google Maps and Brave:
-- Vary industries, locations, and search terms
-- If business has a specific location → search that area first, then expand
-- If business is online/global → search top 3-4 relevant markets
+Do 3-4 searches across Google Maps and Brave:
+- Vary industries and search terms
+- If business has a specific location → search that area first
+- If business is online/global → search the top 1-2 relevant markets
 - Search in the language appropriate for each market
 - Look for contact details, decision-maker names, emails
 
@@ -141,7 +141,7 @@ STEP 4 — SAVE then SCORE:
 1. Save ALL leads using save_leads (JSON array with: name, website, phone, email, contact_person, address, city, country, industry, relevance_reason, source)
 2. Call score_leads to rank them
 
-TARGET: 10-15+ quality leads across 4+ industries.
+TARGET: 15-20 quality leads across 3+ industries. Do NOT find more than 25.
 PREFER leads WITH phone numbers and emails.
 Be CREATIVE — the best SDR finds leads nobody else thinks of.""",
     tools=[search_leads_brave, search_leads_google_maps, save_leads, score_leads],
@@ -164,7 +164,7 @@ ALL pitches MUST be written in that language.
 
 ═══ PHASE 1: GENERATE PITCHES ═══
 
-For EACH of the top scored leads (grade A and B), create:
+For the TOP 5 scored leads only (highest score first), create:
 
 **CALL SCRIPT** (30-45 seconds when spoken, ~75-110 words):
 1. Address them by name (contact_person or company name)
