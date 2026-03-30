@@ -132,13 +132,8 @@ runner = InMemoryRunner(agent=root_agent, app_name=APP_NAME)
 # Pipeline runner — runs the 3-agent sequential pipeline directly (no orchestrator)
 pipeline_runner = InMemoryRunner(agent=analysis_pipeline, app_name=f"{APP_NAME}_pipeline")
 
-# Live voice runner (separate session service for voice sessions)
-live_session_service = InMemorySessionService()
-live_runner = Runner(
-    app_name=f"{APP_NAME}_live",
-    agent=voice_config_live_agent,
-    session_service=live_session_service,
-)
+# Note: Voice config uses google-genai SDK directly (not ADK run_live)
+# because ADK is broken with gemini-3.1-flash-live-preview (issue #5018).
 
 # Track registered sessions
 _registered_sessions: set[str] = set()
@@ -152,7 +147,6 @@ async def lifespan(app: FastAPI):
     logger.info("LeadCall AI Server shutting down...")
     await runner.close()
     await pipeline_runner.close()
-    await live_runner.close()
 
 
 app = FastAPI(title="GRAI API", lifespan=lifespan)
@@ -998,192 +992,266 @@ async def twilio_status_callback(request: Request):
     return {"status": "received"}
 
 
-# ─── WebSocket Voice Config (Live API Bidi-streaming) ───────────────────────
+# ─── WebSocket Voice Config (Direct genai SDK — bypasses ADK) ─────────────
+# ADK's run_live() is broken with gemini-3.1-flash-live-preview (issue #5018).
+# We use the google-genai SDK directly for full control over the Live API.
+
+from google import genai as _genai
+from agents.tools import (
+    assess_voice_readiness,
+    configure_voice_agent,
+    get_voice_agent_config,
+    get_pipeline_state as _get_pipeline_state_tool,
+    save_preferences as _save_preferences_tool,
+    get_preferences as _get_preferences_tool,
+    create_elevenlabs_agent as _create_elevenlabs_agent_tool,
+    make_outbound_call as _make_outbound_call_tool,
+    get_call_status as _get_call_status_tool,
+)
+
+# Map of tool name → callable for the voice agent
+_VOICE_TOOLS = {
+    "assess_voice_readiness": assess_voice_readiness,
+    "configure_voice_agent": configure_voice_agent,
+    "get_voice_agent_config": get_voice_agent_config,
+    "get_pipeline_state": _get_pipeline_state_tool,
+    "save_preferences": _save_preferences_tool,
+    "get_preferences": _get_preferences_tool,
+    "create_elevenlabs_agent": _create_elevenlabs_agent_tool,
+    "make_outbound_call": _make_outbound_call_tool,
+    "get_call_status": _get_call_status_tool,
+}
+
+# System instruction for the live voice agent (from agent.py)
+_VOICE_SYSTEM_INSTRUCTION = voice_config_live_agent.instruction
+
+
+def _build_voice_tool_declarations() -> list[dict]:
+    """Build Gemini function declarations from our tool functions."""
+    import inspect
+    import typing
+    declarations = []
+    for name, func in _VOICE_TOOLS.items():
+        sig = inspect.signature(func)
+        doc = (func.__doc__ or "").split("\n\n")[0].strip()  # First paragraph only
+        properties = {}
+        required = []
+        for pname, param in sig.parameters.items():
+            ptype = "string"
+            annotation = param.annotation
+            if annotation in (int, float):
+                ptype = "number"
+            elif annotation is bool:
+                ptype = "boolean"
+            properties[pname] = {"type": ptype, "description": pname}
+            if param.default is inspect.Parameter.empty:
+                required.append(pname)
+        decl = {
+            "name": name,
+            "description": doc[:500],
+            "parameters": {"type": "object", "properties": properties},
+        }
+        if required:
+            decl["parameters"]["required"] = required
+        declarations.append(decl)
+    return declarations
+
 
 @app.websocket("/ws/voice-config/{session_id}")
 async def voice_config_ws(websocket: WebSocket, session_id: str):
-    """Real-time voice configuration via ADK Live API with native audio model."""
+    """Real-time voice config via google-genai SDK Live API (bypasses ADK)."""
     await websocket.accept()
     logger.info("Voice WS connected: session=%s", session_id[:8])
 
-    # Extract user_id from query params or default
-    user_id = websocket.query_params.get("user_id", "anon")
-
-    # Get or create live session
-    session = await live_session_service.get_session(
-        app_name=live_runner.app_name,
-        user_id=user_id,
-        session_id=session_id,
-    )
-    if not session:
-        await live_session_service.create_session(
-            app_name=live_runner.app_name,
-            user_id=user_id,
-            session_id=session_id,
-        )
-
-    # Configure for bidirectional audio streaming
-    run_config = RunConfig(
-        streaming_mode=StreamingMode.BIDI,
-        response_modalities=["AUDIO"],
-        input_audio_transcription=genai_types.AudioTranscriptionConfig(),
-        output_audio_transcription=genai_types.AudioTranscriptionConfig(),
-        speech_config=genai_types.SpeechConfig(
-            voice_config=genai_types.VoiceConfig(
-                prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
-                    voice_name="Aoede",
-                )
-            )
-        ),
-    )
-
-    live_request_queue = LiveRequestQueue()
-
-    # Send an initial trigger message so the agent starts speaking first.
-    # Without this, the agent sits idle waiting for user audio input.
-    live_request_queue.send_content(
-        genai_types.Content(
-            role="user",
-            parts=[genai_types.Part(text=(
-                "The user just connected to the voice setup session. "
-                "Greet them warmly, introduce yourself, and start the voice configuration process. "
-                "Begin by calling get_pipeline_state to understand their business context."
-            ))],
-        )
-    )
-
-    # Shared flag so upstream stops when downstream dies (and vice versa)
     _ws_closed = asyncio.Event()
+    genai_client = _genai.Client(api_key=os.getenv("GOOGLE_API_KEY", ""))
 
-    async def upstream_task():
-        """Receive audio/text from WebSocket client → LiveRequestQueue."""
-        try:
-            while not _ws_closed.is_set():
-                raw = await websocket.receive()
-
-                # Starlette sends {"type": "websocket.disconnect"} on close
-                if raw.get("type") == "websocket.disconnect":
-                    break
-
-                if "bytes" in raw and raw["bytes"]:
-                    audio_blob = genai_types.Blob(
-                        mime_type="audio/pcm;rate=16000",
-                        data=raw["bytes"],
-                    )
-                    live_request_queue.send_realtime(audio_blob)
-
-                elif "text" in raw and raw["text"]:
-                    msg = json.loads(raw["text"])
-                    if msg.get("type") == "audio":
-                        audio_data = base64.b64decode(msg["data"])
-                        audio_blob = genai_types.Blob(
-                            mime_type="audio/pcm;rate=16000",
-                            data=audio_data,
-                        )
-                        live_request_queue.send_realtime(audio_blob)
-                    elif msg.get("type") == "text":
-                        content = genai_types.Content(
-                            parts=[genai_types.Part(text=msg["text"])]
-                        )
-                        live_request_queue.send_content(content)
-                    elif msg.get("type") == "close":
-                        break
-        except WebSocketDisconnect:
-            pass
-        except RuntimeError:
-            pass  # WebSocket already closed
-        except Exception as e:
-            logger.warning("Voice WS upstream error: %s: %s", type(e).__name__, e)
-        finally:
-            _ws_closed.set()
-            live_request_queue.close()
-
-    async def downstream_task():
-        """Receive events from run_live() → send to WebSocket client."""
-        try:
-            async for event in live_runner.run_live(
-                user_id=user_id,
-                session_id=session_id,
-                live_request_queue=live_request_queue,
-                run_config=run_config,
-            ):
-                # Handle transcription events (input/output speech-to-text)
-                sc = getattr(event, "server_content", None)
-                if sc is not None:
-                    input_tx = getattr(sc, "input_transcription", None)
-                    if input_tx and getattr(input_tx, "text", None):
-                        await websocket.send_text(json.dumps({
-                            "type": "transcript",
-                            "text": input_tx.text,
-                            "author": "user",
-                        }))
-                    output_tx = getattr(sc, "output_transcription", None)
-                    if output_tx and getattr(output_tx, "text", None):
-                        await websocket.send_text(json.dumps({
-                            "type": "transcript",
-                            "text": output_tx.text,
-                            "author": "voice_config_live",
-                        }))
-
-                # Safely access content and parts — some events have neither
-                content = getattr(event, "content", None)
-                parts = getattr(content, "parts", None) if content else None
-                if not parts:
-                    if hasattr(event, "is_final_response") and event.is_final_response():
-                        await websocket.send_text(json.dumps({"type": "turn_complete"}))
-                    continue
-
-                for part in parts:
-                    if getattr(part, "inline_data", None) and part.inline_data.data:
-                        audio_b64 = base64.b64encode(part.inline_data.data).decode("utf-8")
-                        await websocket.send_text(json.dumps({
-                            "type": "audio",
-                            "data": audio_b64,
-                            "mime_type": getattr(part.inline_data, "mime_type", None) or "audio/pcm;rate=24000",
-                        }))
-                    elif getattr(part, "text", None):
-                        await websocket.send_text(json.dumps({
-                            "type": "transcript",
-                            "text": part.text,
-                            "author": getattr(event, "author", "voice_config_agent"),
-                        }))
-                    elif getattr(part, "function_call", None):
-                        await websocket.send_text(json.dumps({
-                            "type": "tool_call",
-                            "tool_name": part.function_call.name,
-                        }))
-                    elif getattr(part, "function_response", None):
-                        await websocket.send_text(json.dumps({
-                            "type": "tool_result",
-                            "tool_name": part.function_response.name,
-                            "status": "done",
-                        }))
-
-        except WebSocketDisconnect:
-            pass
-        except RuntimeError:
-            pass  # WebSocket already closed
-        except Exception as e:
-            logger.warning("Voice WS downstream error: %s: %s", type(e).__name__, e)
-            if not _ws_closed.is_set():
-                try:
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "message": "Voice connection error. Please reconnect.",
-                    }))
-                except Exception:
-                    pass
-        finally:
-            _ws_closed.set()
+    live_config = {
+        "response_modalities": ["AUDIO"],
+        "speech_config": {
+            "voice_config": {
+                "prebuilt_voice_config": {"voice_name": "Aoede"}
+            }
+        },
+        "system_instruction": _VOICE_SYSTEM_INSTRUCTION,
+        "input_audio_transcription": {},
+        "output_audio_transcription": {},
+        "tools": [{"function_declarations": _build_voice_tool_declarations()}],
+    }
 
     try:
-        await asyncio.gather(
-            upstream_task(),
-            downstream_task(),
-            return_exceptions=True,
-        )
+        async with genai_client.aio.live.connect(
+            model="gemini-3.1-flash-live-preview",
+            config=live_config,
+        ) as live_session:
+            logger.info("Voice Live session established for %s", session_id[:8])
+
+            # Send initial trigger so the agent speaks first
+            await live_session.send_client_content(
+                turns=genai_types.Content(
+                    role="user",
+                    parts=[genai_types.Part(text=(
+                        "The user just connected to the voice setup session. "
+                        "Greet them warmly, introduce yourself, and start the voice configuration process. "
+                        "Begin by calling get_pipeline_state to understand their business context."
+                    ))],
+                ),
+                turn_complete=True,
+            )
+
+            async def upstream_task():
+                """Client WebSocket → Gemini Live session."""
+                try:
+                    while not _ws_closed.is_set():
+                        raw = await websocket.receive()
+                        if raw.get("type") == "websocket.disconnect":
+                            break
+
+                        if "bytes" in raw and raw["bytes"]:
+                            await live_session.send_realtime_input(
+                                audio=genai_types.Blob(
+                                    mime_type="audio/pcm;rate=16000",
+                                    data=raw["bytes"],
+                                )
+                            )
+                        elif "text" in raw and raw["text"]:
+                            msg = json.loads(raw["text"])
+                            if msg.get("type") == "audio":
+                                audio_data = base64.b64decode(msg["data"])
+                                await live_session.send_realtime_input(
+                                    audio=genai_types.Blob(
+                                        mime_type="audio/pcm;rate=16000",
+                                        data=audio_data,
+                                    )
+                                )
+                            elif msg.get("type") == "text":
+                                await live_session.send_realtime_input(
+                                    text=msg["text"],
+                                )
+                            elif msg.get("type") == "close":
+                                break
+                except WebSocketDisconnect:
+                    pass
+                except RuntimeError:
+                    pass
+                except Exception as e:
+                    logger.warning("Voice WS upstream error: %s: %s", type(e).__name__, e)
+                finally:
+                    _ws_closed.set()
+
+            async def downstream_task():
+                """Gemini Live session → Client WebSocket (with tool execution)."""
+                try:
+                    while not _ws_closed.is_set():
+                        async for msg in live_session.receive():
+                            if _ws_closed.is_set():
+                                break
+
+                            # ── Audio / text from model ──
+                            sc = msg.server_content
+                            if sc:
+                                # Transcriptions
+                                input_tx = getattr(sc, "input_transcription", None)
+                                if input_tx and getattr(input_tx, "text", None):
+                                    await websocket.send_text(json.dumps({
+                                        "type": "transcript", "text": input_tx.text, "author": "user",
+                                    }))
+                                output_tx = getattr(sc, "output_transcription", None)
+                                if output_tx and getattr(output_tx, "text", None):
+                                    await websocket.send_text(json.dumps({
+                                        "type": "transcript", "text": output_tx.text, "author": "voice_config_live",
+                                    }))
+
+                                # Model turn parts (audio, text)
+                                turn = getattr(sc, "model_turn", None)
+                                if turn and turn.parts:
+                                    for part in turn.parts:
+                                        if getattr(part, "inline_data", None) and part.inline_data.data:
+                                            audio_b64 = base64.b64encode(part.inline_data.data).decode("utf-8")
+                                            await websocket.send_text(json.dumps({
+                                                "type": "audio",
+                                                "data": audio_b64,
+                                                "mime_type": getattr(part.inline_data, "mime_type", None) or "audio/pcm;rate=24000",
+                                            }))
+                                        elif getattr(part, "text", None):
+                                            # Skip thought/reasoning text
+                                            if not getattr(part, "thought", False):
+                                                await websocket.send_text(json.dumps({
+                                                    "type": "transcript",
+                                                    "text": part.text,
+                                                    "author": "voice_config_live",
+                                                }))
+
+                                # Turn complete
+                                if getattr(sc, "turn_complete", False):
+                                    await websocket.send_text(json.dumps({"type": "turn_complete"}))
+
+                            # ── Tool calls from model ──
+                            tc = msg.tool_call
+                            if tc and tc.function_calls:
+                                responses = []
+                                for fc in tc.function_calls:
+                                    await websocket.send_text(json.dumps({
+                                        "type": "tool_call", "tool_name": fc.name,
+                                    }))
+
+                                    # Execute the tool
+                                    tool_fn = _VOICE_TOOLS.get(fc.name)
+                                    if tool_fn:
+                                        try:
+                                            args = dict(fc.args) if fc.args else {}
+                                            result = await asyncio.get_event_loop().run_in_executor(
+                                                None, lambda: tool_fn(**args)
+                                            )
+                                        except Exception as e:
+                                            logger.error("Voice tool %s error: %s", fc.name, e)
+                                            result = {"status": "error", "error": str(e)}
+                                    else:
+                                        result = {"status": "error", "error": f"Unknown tool: {fc.name}"}
+
+                                    responses.append(genai_types.FunctionResponse(
+                                        name=fc.name,
+                                        response=result if isinstance(result, dict) else {"result": str(result)},
+                                        id=fc.id,
+                                    ))
+                                    await websocket.send_text(json.dumps({
+                                        "type": "tool_result", "tool_name": fc.name, "status": "done",
+                                    }))
+
+                                # Send all tool responses back to the model
+                                await live_session.send_tool_response(
+                                    function_responses=responses,
+                                )
+
+                except WebSocketDisconnect:
+                    pass
+                except RuntimeError:
+                    pass
+                except Exception as e:
+                    logger.warning("Voice WS downstream error: %s: %s", type(e).__name__, e)
+                    if not _ws_closed.is_set():
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "error",
+                                "message": "Voice connection error. Please reconnect.",
+                            }))
+                        except Exception:
+                            pass
+                finally:
+                    _ws_closed.set()
+
+            await asyncio.gather(upstream_task(), downstream_task(), return_exceptions=True)
+
+    except Exception as e:
+        logger.error("Voice Live connect error: %s: %s", type(e).__name__, e)
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "message": f"Could not connect to voice service: {type(e).__name__}",
+            }))
+        except Exception:
+            pass
     finally:
-        live_request_queue.close()
         try:
             await websocket.close()
         except Exception:
