@@ -77,18 +77,23 @@ pipeline_state: dict = _empty_state()
 
 
 def load_campaign_state(campaign_id: int) -> None:
-    """Load a campaign's state from DB into the pipeline_state cache."""
-    global pipeline_state
+    """Load a campaign's state from DB into the pipeline_state cache.
+    Updates in-place to preserve references from server.py.
+    """
     if campaign_id and campaign_id > 0:
-        pipeline_state = get_campaign_state(campaign_id)
+        new_state = get_campaign_state(campaign_id)
     else:
-        pipeline_state = _empty_state()
+        new_state = _empty_state()
+    pipeline_state.clear()
+    pipeline_state.update(new_state)
 
 
 def reset_pipeline_state() -> None:
-    """Reset the pipeline state cache to empty."""
-    global pipeline_state
-    pipeline_state = _empty_state()
+    """Reset the pipeline state cache to empty.
+    Updates in-place to preserve references from server.py.
+    """
+    pipeline_state.clear()
+    pipeline_state.update(_empty_state())
 
 
 def _campaign_id() -> int:
