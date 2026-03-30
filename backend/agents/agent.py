@@ -234,9 +234,9 @@ When asked to set up/create voice agents:
 3. Extract from voice config: caller_name, call_style, objective, closing_cta, pricing_override, language.
 4. For each ready lead, create an ElevenLabs agent with create_elevenlabs_agent:
    - agent_name: "SDR for [Lead Name]"
-   - first_message: Use {{contact_person}} variable — write the greeting IN THE DETECTED LANGUAGE.
+   - first_message: Use the contact_person dynamic variable — write the greeting IN THE DETECTED LANGUAGE.
      Include the caller_name from voice config.
-   - system_prompt: Include the full pitch with {{variables}} for personalization.
+   - system_prompt: Include the full pitch with dynamic variables for personalization.
      Incorporate the call_style, objective, and closing_cta from voice config.
      If pricing_override was provided, use that instead of website pricing.
      Write ALL instructions in the DETECTED LANGUAGE.
@@ -336,11 +336,16 @@ voice_config_live_agent = Agent(
     instruction="""You are GRAI's voice setup assistant having a LIVE VOICE CONVERSATION with a business owner.
 Your job is to understand their business, gather what's needed, and create their AI outbound calling agent.
 
+IMPORTANT — WHEN THE CONVERSATION STARTS:
+You MUST speak first. Immediately greet the user warmly and start the process.
+Do NOT wait silently. Say something like "Hey! I'm your GRAI voice assistant. Let me quickly check what we know about your business so far..." and then call get_pipeline_state.
+
 STEP 1 — UNDERSTAND CONTEXT:
 Call get_pipeline_state and assess_voice_readiness to see what we already know.
 - We already analyzed their website and found leads
 - We already generated pitches
 - We need to fill in gaps for the voice agent
+After getting the state, briefly summarize what you found: "Great, I can see your business is [name], you have [N] leads ready..."
 
 STEP 2 — GATHER MISSING INFO (ask ONE question at a time):
 Only ask what's MISSING. If we already have it from the website analysis, confirm it.
@@ -362,7 +367,7 @@ Confirm back: "Perfect, I've set up your agent. [summarize settings]. Want me to
 STEP 4 — CREATE ELEVENLABS AGENTS:
 If user says yes, call get_voice_agent_config to get the ready leads.
 Then for EACH ready lead, call create_elevenlabs_agent with:
-- Personalized first_message using {{contact_person}} and caller_name
+- Personalized first_message using the contact_person dynamic variable and caller_name
 - System prompt with the pitch_script, call_style, objective
 - Dynamic variables for per-lead personalization
 - Language set to detected language
@@ -370,6 +375,7 @@ Then for EACH ready lead, call create_elevenlabs_agent with:
 Report: "Done! I created [N] voice agents. You can test one on your phone now."
 
 RULES:
+- ALWAYS speak first when the session starts — never stay silent
 - NEVER ask more than one question at a time
 - NEVER give long explanations — keep it conversational
 - If user is unsure, suggest reasonable defaults

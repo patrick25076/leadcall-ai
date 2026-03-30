@@ -907,14 +907,14 @@ def create_elevenlabs_agent(
 ) -> dict:
     """Creates a personalized ElevenLabs conversational agent for outbound SDR calls.
 
-    Uses dynamic variables ({{var_name}} syntax) in the system prompt and first message
+    Uses dynamic variables (double-brace syntax like var_name) in the system prompt and first message
     so each call is personalized per lead. The agent is configured for natural,
     professional sales conversations with optimized TTS, ASR, and turn settings.
 
     Args:
         agent_name: Name for the agent (e.g. "SDR for Acme Corp")
-        first_message: Opening message with {{variables}} (e.g. "Hi {{contact_person}}, this is...")
-        system_prompt: Full instructions with {{variables}} for personalization
+        first_message: Opening message with dynamic variable placeholders for personalization
+        system_prompt: Full instructions with dynamic variable placeholders for personalization
         lead_name: The lead company name
         lead_company: Full company name of the lead
         lead_industry: Industry of the lead
