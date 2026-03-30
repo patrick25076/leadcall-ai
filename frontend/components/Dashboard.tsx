@@ -69,20 +69,27 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
     }
   }, [campaignId]);
 
-  // Poll state every 5s while running
+  // Poll state every 3s while running (faster updates)
   useEffect(() => {
     if (!running) return;
-    const stateUrl = campaignId
-      ? `${API}/api/campaigns/${campaignId}/state`
-      : `${API}/api/state`;
-    const interval = setInterval(() => {
-      fetch(stateUrl)
+    const poll = () => {
+      fetch(`${API}/api/state`)
         .then((r) => r.json())
-        .then((state) => setPipelineState(state))
-        .catch((err) => { console.error("API error:", err); setError("Connection error. Check if the backend is running."); });
-    }, 5000);
+        .then((state) => {
+          if (state) {
+            setPipelineState(state);
+            // Auto-detect completion
+            if (state.judged_pitches?.length > 0 || state.pitches?.length > 0) {
+              setPipelineComplete(true);
+            }
+          }
+        })
+        .catch(() => {});
+    };
+    poll(); // Immediate first poll
+    const interval = setInterval(poll, 3000);
     return () => clearInterval(interval);
-  }, [running, campaignId]);
+  }, [running]);
 
   // SSE stream reader — reads events from the pipeline SSE stream
   const readStream = useCallback(async (response: Response) => {
@@ -151,6 +158,7 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
     setEvents([]);
     setActiveAgent(null);
     setPipelineComplete(false);
+    setError(null);
 
     try {
       const response = await fetch(`${API}/api/analyze`, {
@@ -158,10 +166,35 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: targetUrl.trim() }),
       });
-      await readStream(response);
+
+      if (!response.ok) {
+        setError(`Analysis failed: ${response.status} ${response.statusText}`);
+        return;
+      }
+
+      // Try to read SSE stream
+      if (response.body) {
+        await readStream(response);
+      } else {
+        // Fallback: if SSE body isn't readable, poll for state updates
+        setEvents([{ type: "text", author: "system", timestamp: new Date().toISOString(), content: "Pipeline started. Waiting for results..." }]);
+      }
     } catch (err) {
       console.error("Stream error:", err);
+      setError("Could not connect to the pipeline. Polling for updates...");
+      // Pipeline may still be running on the server — poll for state
     } finally {
+      // Fetch final state regardless of stream success
+      try {
+        const stateResp = await fetch(`${API}/api/state`);
+        if (stateResp.ok) {
+          const state = await stateResp.json();
+          if (state) setPipelineState(state);
+          if (state?.judged_pitches?.length > 0 || state?.leads?.length > 0) {
+            setPipelineComplete(true);
+          }
+        }
+      } catch {}
       setRunning(false);
       setActiveAgent(null);
     }
