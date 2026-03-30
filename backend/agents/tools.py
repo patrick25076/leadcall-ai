@@ -122,7 +122,7 @@ def _campaign_id() -> int:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @traced(type="tool", name="crawl_website")
-def crawl_website(url: str, max_pages: int = 10) -> dict:
+def crawl_website(url: str, max_pages: int = 3) -> dict:
     """Crawls a website across multiple pages to extract comprehensive business info.
 
     Uses Firecrawl API if available (handles JS, anti-bot, returns clean markdown).
@@ -130,13 +130,16 @@ def crawl_website(url: str, max_pages: int = 10) -> dict:
 
     Args:
         url: The business website URL (e.g. https://icetrust.ro)
-        max_pages: Maximum number of pages to crawl (default 10)
+        max_pages: Maximum number of pages to crawl (default 3, max 5 to save credits)
 
     Returns:
         dict with status, pages crawled (url, title, content), and total_content
     """
     if not url.startswith("http"):
         url = "https://" + url
+
+    # Cap pages to save Firecrawl credits during testing
+    max_pages = min(max_pages, 5)
 
     # SSRF protection: validate URL before any HTTP request
     if not is_safe_url(url):
