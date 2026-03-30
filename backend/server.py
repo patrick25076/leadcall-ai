@@ -68,7 +68,7 @@ from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.agents.live_request_queue import LiveRequestQueue
 from google.genai import types as genai_types
 
-from agents.agent import root_agent, voice_config_live_agent
+from agents.agent import root_agent, voice_config_live_agent, analysis_pipeline
 from agents.tools import pipeline_state, load_campaign_state, reset_pipeline_state
 from auth import AuthMiddleware
 from db import get_conn, get_campaigns_for_user, get_campaign_state, get_campaign, create_campaign as db_create_campaign
@@ -87,6 +87,9 @@ from observability import RequestTimingMiddleware, start_pipeline_tracking, log_
 APP_NAME = "leadcall_ai"
 
 runner = InMemoryRunner(agent=root_agent, app_name=APP_NAME)
+
+# Pipeline runner — runs the 3-agent sequential pipeline directly (no orchestrator)
+pipeline_runner = InMemoryRunner(agent=analysis_pipeline, app_name=f"{APP_NAME}_pipeline")
 
 # Live voice runner (separate session service for voice sessions)
 live_session_service = InMemorySessionService()
@@ -107,6 +110,7 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("LeadCall AI Server shutting down...")
     await runner.close()
+    await pipeline_runner.close()
     await live_runner.close()
 
 
@@ -309,9 +313,11 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 
 async def stream_agent_events(
-    session_id: str, message: str, user_id: str = "default_user"
+    session_id: str, message: str, user_id: str = "default_user",
+    use_runner: Optional[InMemoryRunner] = None,
 ) -> AsyncGenerator[dict, None]:
     """Runs the agent and yields SSE-formatted event dicts with retry on 429."""
+    active_runner = use_runner or runner
     user_message = genai_types.Content(
         role="user",
         parts=[genai_types.Part(text=message)],
@@ -320,7 +326,7 @@ async def stream_agent_events(
     retries = 0
     while True:
         try:
-            async for event in runner.run_async(
+            async for event in active_runner.run_async(
                 user_id=user_id,
                 session_id=session_id,
                 new_message=user_message,
@@ -368,7 +374,13 @@ async def health():
 
 @app.post("/api/analyze")
 async def analyze_website(req: AnalyzeRequest, request: Request):
-    """Starts the analysis pipeline for a URL. Returns SSE stream."""
+    """Starts the analysis pipeline for a URL. Returns SSE stream.
+
+    Uses the pipeline_runner directly (SequentialAgent: website_analyzer →
+    lead_finder → pitch_generator) instead of the orchestrator, so the
+    pipeline always runs end-to-end without relying on Gemini to "decide"
+    to transfer.
+    """
     safe_url = sanitize_url(req.url)
     if not safe_url:
         raise HTTPException(status_code=400, detail="Invalid or unsafe URL")
@@ -380,16 +392,26 @@ async def analyze_website(req: AnalyzeRequest, request: Request):
     pipeline_state["user_id"] = user_id
     logger.info("Pipeline state reset for new analysis: %s", safe_url)
 
-    session_id = await get_or_create_session(user_id=user_id)
+    # Create session on the pipeline runner (not the orchestrator)
+    pipeline_session = await pipeline_runner.session_service.create_session(
+        app_name=pipeline_runner.app_name,
+        user_id=user_id,
+    )
+    session_id = pipeline_session.id
+    _registered_sessions.add(session_id)
+
     message = f"Analyze this business website and run the full pipeline: {safe_url}"
 
     async def event_generator():
         yield {"event": "session", "data": json.dumps({"session_id": session_id})}
         try:
-            async for event_data in stream_agent_events(session_id, message, user_id=user_id):
+            async for event_data in stream_agent_events(
+                session_id, message, user_id=user_id, use_runner=pipeline_runner
+            ):
                 yield {"event": "agent", "data": json.dumps(event_data, default=str)}
         except Exception as e:
             logger.error("Pipeline error: %s", e)
+            sentry_sdk.capture_exception(e)
             yield {
                 "event": "agent",
                 "data": json.dumps({
