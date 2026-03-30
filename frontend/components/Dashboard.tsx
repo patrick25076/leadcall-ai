@@ -41,6 +41,7 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
   const [pipelineComplete, setPipelineComplete] = useState(false);
   const [chatInput, setChatInput] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [polling, setPolling] = useState(false);
 
   // Restore state on mount
   useEffect(() => {
@@ -57,7 +58,7 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
       .then((state) => {
         if (state && (state.business_analysis || state.leads?.length)) {
           setPipelineState(state);
-          if (state.judged_pitches?.length > 0) setPipelineComplete(true);
+          if (state.judged_pitches?.length > 0 || state.pitches?.length > 0) setPipelineComplete(true);
         }
       })
       .catch((err) => { console.error("API error:", err); setError("Connection error. Check if the backend is running."); });
@@ -69,27 +70,60 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
     }
   }, [campaignId]);
 
-  // Poll state every 3s while running (faster updates)
+  // Poll state every 3s while pipeline is running OR polling is active
+  // This is INDEPENDENT of the SSE stream — keeps going until we detect completion
   useEffect(() => {
-    if (!running) return;
+    if (!polling) return;
+    let prevLeads = 0;
+    let prevPitches = 0;
+    let staleCount = 0;
+
     const poll = () => {
       fetch(`${API}/api/state`)
         .then((r) => r.json())
         .then((state) => {
-          if (state) {
-            setPipelineState(state);
-            // Auto-detect completion
-            if (state.judged_pitches?.length > 0 || state.pitches?.length > 0) {
+          if (!state) return;
+          setPipelineState(state);
+
+          const leads = (state.leads as unknown[] || []).length;
+          const pitches = (state.pitches as unknown[] || []).length;
+          const judged = (state.judged_pitches as unknown[] || []).length;
+          const ba = state.business_analysis;
+
+          // Update running indicator based on what we see
+          if (ba && !activeAgent) setActiveAgent("website_analyzer");
+          if (leads > 0 && !activeAgent) setActiveAgent("lead_finder");
+          if (pitches > 0 && !activeAgent) setActiveAgent("pitch_generator");
+
+          // Detect completion: pitches exist, or state hasn't changed for 30s
+          if (judged > 0 || pitches > 0) {
+            setPipelineComplete(true);
+            setPolling(false);
+            setRunning(false);
+            setActiveAgent(null);
+          } else if (leads === prevLeads && pitches === prevPitches) {
+            staleCount++;
+            // If no changes for 60s (20 polls * 3s), assume pipeline finished or stalled
+            if (staleCount > 20 && leads > 0) {
               setPipelineComplete(true);
+              setPolling(false);
+              setRunning(false);
+              setActiveAgent(null);
             }
+          } else {
+            staleCount = 0;
           }
+
+          prevLeads = leads;
+          prevPitches = pitches;
         })
         .catch(() => {});
     };
+
     poll(); // Immediate first poll
     const interval = setInterval(poll, 3000);
     return () => clearInterval(interval);
-  }, [running]);
+  }, [polling, activeAgent]);
 
   // SSE stream reader — reads events from the pipeline SSE stream
   const readStream = useCallback(async (response: Response) => {
@@ -155,8 +189,9 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
     if (!targetUrl.trim() || running) return;
     analytics.analysisStarted(targetUrl);
     setRunning(true);
+    setPolling(true); // Start polling IMMEDIATELY — independent of SSE
     setEvents([]);
-    setActiveAgent(null);
+    setActiveAgent("website_analyzer");
     setPipelineComplete(false);
     setError(null);
 
@@ -169,35 +204,24 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
 
       if (!response.ok) {
         setError(`Analysis failed: ${response.status} ${response.statusText}`);
+        setRunning(false);
         return;
       }
 
-      // Try to read SSE stream
+      // Try to read SSE stream for live events (activity feed)
+      // Even if this fails, polling will keep the state updated
       if (response.body) {
-        await readStream(response);
-      } else {
-        // Fallback: if SSE body isn't readable, poll for state updates
-        setEvents([{ type: "text", author: "system", timestamp: new Date().toISOString(), content: "Pipeline started. Waiting for results..." }]);
+        try {
+          await readStream(response);
+        } catch {
+          // SSE failed but polling continues — that's fine
+        }
       }
     } catch (err) {
       console.error("Stream error:", err);
-      setError("Could not connect to the pipeline. Polling for updates...");
-      // Pipeline may still be running on the server — poll for state
-    } finally {
-      // Fetch final state regardless of stream success
-      try {
-        const stateResp = await fetch(`${API}/api/state`);
-        if (stateResp.ok) {
-          const state = await stateResp.json();
-          if (state) setPipelineState(state);
-          if (state?.judged_pitches?.length > 0 || state?.leads?.length > 0) {
-            setPipelineComplete(true);
-          }
-        }
-      } catch {}
-      setRunning(false);
-      setActiveAgent(null);
+      // Pipeline is still running on the server — polling will pick up changes
     }
+    // Don't set running=false here — polling handles completion detection
   }, [running, readStream]);
 
   const sendChat = useCallback(async () => {
