@@ -472,6 +472,24 @@ async def list_campaigns(request: Request):
     """List all campaigns for the authenticated user."""
     user_id = _get_user_id(request)
     campaigns = get_campaigns_for_user(user_id)
+    # Also include campaigns with no user_id (created before user tracking)
+    if not campaigns:
+        from db import is_configured, get_db
+        if is_configured():
+            try:
+                result = get_db().table("campaigns").select(
+                    "id, website_url, business_name, status, created_at, updated_at"
+                ).or_(f"user_id.eq.{user_id},user_id.is.null").order("id", desc=True).execute()
+                campaigns = result.data or []
+                # Enrich with counts
+                for c in campaigns:
+                    cid = c["id"]
+                    lr = get_db().table("leads").select("id", count="exact").eq("campaign_id", cid).execute()
+                    c["lead_count"] = lr.count if lr.count is not None else len(lr.data or [])
+                    c["pitch_count"] = 0
+                    c["agent_count"] = 0
+            except Exception:
+                pass
     return {"campaigns": campaigns}
 
 

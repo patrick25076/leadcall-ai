@@ -145,8 +145,8 @@ def crawl_website(url: str, max_pages: int = 3) -> dict:
     if not is_safe_url(url):
         return {"status": "error", "error": "URL not allowed. Only public HTTP(S) URLs are accepted."}
 
-    # Create a campaign in the DB
-    cid = create_campaign(url)
+    # Create a campaign in the DB (with user_id from pipeline state)
+    cid = create_campaign(url, user_id=pipeline_state.get("user_id", ""))
     pipeline_state["campaign_id"] = cid
 
     firecrawl_key = os.getenv("FIRECRAWL_API_KEY", "")
