@@ -43,13 +43,15 @@ export default function Home() {
     });
   }, []);
 
+  const [autoAnalyzeUrl, setAutoAnalyzeUrl] = useState<string | null>(null);
+
   const handleOnboardingComplete = (config: OnboardingConfig) => {
     saveToStorage("url", config.websiteUrl);
     saveToStorage("onboarded", true);
     saveToStorage("onboarding_config", config);
-    // Go to dashboard for the new campaign (will auto-start analysis)
+    setAutoAnalyzeUrl(config.websiteUrl); // Tell Dashboard to auto-start
     setView("dashboard");
-    setActiveCampaignId(null); // null = new campaign, will use URL from storage
+    setActiveCampaignId(null);
   };
 
   const handleLogout = async () => {
@@ -100,6 +102,7 @@ export default function Home() {
     <Dashboard
       onLogout={handleLogout}
       campaignId={activeCampaignId ?? undefined}
+      autoAnalyzeUrl={autoAnalyzeUrl ?? undefined}
       onBack={handleBackToCampaigns}
     />
   );

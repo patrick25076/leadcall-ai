@@ -31,7 +31,7 @@ function loadFromStorage<T>(key: string, fallback: T): T {
   return fallback;
 }
 
-export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: () => void; campaignId?: number; onBack?: () => void }) {
+export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl }: { onLogout: () => void; campaignId?: number; onBack?: () => void; autoAnalyzeUrl?: string }) {
   const [tab, setTab] = useState<Tab>("activity");
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [pipelineState, setPipelineState] = useState<Record<string, unknown> | null>(null);
@@ -63,12 +63,14 @@ export default function Dashboard({ onLogout, campaignId, onBack }: { onLogout: 
       })
       .catch((err) => { console.error("API error:", err); setError("Connection error. Check if the backend is running."); });
 
-    // If we have a URL from onboarding but no analysis yet, auto-start
-    const savedUrl = loadFromStorage<string>("url", "");
-    if (savedUrl && !savedSession && !campaignId) {
-      startAnalysis(savedUrl);
-    }
   }, [campaignId]);
+
+  // Auto-start analysis when coming from onboarding with a URL
+  useEffect(() => {
+    if (autoAnalyzeUrl && !running) {
+      startAnalysis(autoAnalyzeUrl);
+    }
+  }, [autoAnalyzeUrl]);
 
   // Poll state every 3s while pipeline is running OR polling is active
   // This is INDEPENDENT of the SSE stream — keeps going until we detect completion
