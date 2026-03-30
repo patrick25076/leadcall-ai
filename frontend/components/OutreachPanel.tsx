@@ -29,6 +29,7 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
   const [showVoiceSelector, setShowVoiceSelector] = useState(false);
   const [approvedLeads, setApprovedLeads] = useState<Set<string>>(new Set());
   const [batchStatus, setBatchStatus] = useState<string | null>(null);
+  const [selectedLeads, setSelectedLeads] = useState<Set<number>>(new Set());
 
   // Voice setup via WebSocket (native audio)
   const [voiceActive, setVoiceActive] = useState(false);
@@ -93,10 +94,16 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
 
     ws.onclose = () => {
       setVoiceActive(false);
-      setVoiceStatus("Voice setup complete");
-      if (setupStep === "voice_setup") {
-        setSetupStep("creating");
-      }
+      // Only mark complete if we actually had a conversation
+      setVoiceTranscript((prev) => {
+        if (prev.length > 0) {
+          setVoiceStatus("Voice setup complete");
+          setSetupStep("creating");
+        } else {
+          setVoiceStatus("Connection closed — try again");
+        }
+        return prev;
+      });
     };
 
     ws.onerror = () => {
@@ -169,14 +176,17 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
 
   // Use text chat to create agents (fallback if voice doesn't work)
   const createAgentsViaChat = async () => {
-    setSetupStep("creating");
-    setVoiceStatus("Creating agents via text...");
+    const leadsToCreate = selectedLeads.size > 0
+      ? Array.from(selectedLeads).map((i) => String(readyToCall[i]?.lead_name)).filter(Boolean)
+      : readyToCall.map((p) => String(p.lead_name));
+
+    setVoiceStatus(`Creating ${leadsToCreate.length} agent${leadsToCreate.length !== 1 ? "s" : ""}...`);
     try {
       const resp = await fetch(`${API}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message: "Create the ElevenLabs voice agents for all ready leads. Use the business analysis and voice config we already have.",
+          message: `Create ElevenLabs voice agents for these specific leads only: ${leadsToCreate.join(", ")}. Use the business analysis and voice config we already have.`,
           session_id: sessionId,
         }),
       });
@@ -380,22 +390,78 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
           </div>
         )}
 
-        {/* Step 2: Creating agents */}
+        {/* Step 2: Creating agents — select which leads */}
         {setupStep === "creating" && (
-          <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-6 text-center">
-            <div className="text-4xl mb-4">⚡</div>
-            <h3 className="text-lg font-medium text-white mb-2">Create Voice Agents</h3>
-            <p className="text-zinc-400 text-sm mb-4">
-              Ready to create personalized ElevenLabs agents for {readyToCall.length} leads.
-            </p>
+          <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-6">
+            <div className="text-center mb-4">
+              <h3 className="text-lg font-medium text-white mb-1">Select Leads for Voice Agents</h3>
+              <p className="text-zinc-400 text-sm">
+                Choose which qualified leads should get personalized voice agents.
+              </p>
+            </div>
+
+            {readyToCall.length > 0 && (
+              <div className="mb-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs text-zinc-500">{selectedLeads.size} of {readyToCall.length} selected</span>
+                  <button
+                    onClick={() => {
+                      if (selectedLeads.size === readyToCall.length) {
+                        setSelectedLeads(new Set());
+                      } else {
+                        setSelectedLeads(new Set(readyToCall.map((_, i) => i)));
+                      }
+                    }}
+                    className="text-xs text-emerald-400 hover:text-emerald-300"
+                  >
+                    {selectedLeads.size === readyToCall.length ? "Deselect all" : "Select all"}
+                  </button>
+                </div>
+                <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                  {readyToCall.map((p, i) => (
+                    <label
+                      key={i}
+                      className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
+                        selectedLeads.has(i)
+                          ? "bg-emerald-500/10 border border-emerald-500/20"
+                          : "bg-zinc-800/30 border border-transparent hover:border-zinc-700"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedLeads.has(i)}
+                        onChange={() => {
+                          setSelectedLeads((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(i)) next.delete(i);
+                            else next.add(i);
+                            return next;
+                          });
+                        }}
+                        className="accent-emerald-500"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm text-white font-medium truncate">{String(p.lead_name)}</p>
+                        <p className="text-xs text-zinc-500 truncate">{String(p.phone || "No phone")}</p>
+                      </div>
+                      {p.score != null && (
+                        <span className="text-xs text-zinc-500">{String(p.score)}/10</span>
+                      )}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <button
               onClick={createAgentsViaChat}
-              className="bg-emerald-600 text-white font-medium py-3 px-8 rounded-xl hover:bg-emerald-500 transition-colors"
+              disabled={selectedLeads.size === 0}
+              className="w-full bg-emerald-600 text-white font-medium py-3 px-8 rounded-xl hover:bg-emerald-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              Create {readyToCall.length} Voice Agents
+              Create {selectedLeads.size} Voice Agent{selectedLeads.size !== 1 ? "s" : ""}
             </button>
             {voiceStatus && (
-              <p className="text-zinc-500 text-xs mt-3">{voiceStatus}</p>
+              <p className="text-zinc-500 text-xs mt-3 text-center">{voiceStatus}</p>
             )}
           </div>
         )}

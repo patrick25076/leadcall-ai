@@ -898,7 +898,8 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
     await websocket.accept()
     logger.info("Voice WS connected: session=%s", session_id[:8])
 
-    user_id = USER_ID
+    # Extract user_id from query params or default
+    user_id = websocket.query_params.get("user_id", "anon")
 
     # Get or create live session
     session = await live_session_service.get_session(
