@@ -435,20 +435,55 @@ async def analyze_website(req: AnalyzeRequest, request: Request):
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, request: Request):
-    """General chat with the orchestrator. Returns SSE stream."""
+    """General chat with the orchestrator. Returns SSE stream.
+
+    Injects current pipeline state as context so the orchestrator knows
+    what business was analyzed, what leads exist, and what pitches were generated.
+    """
     message = sanitize_chat_message(req.message)
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
     user_id = _get_user_id(request)
 
-    # CRITICAL: Reuse session from client so agent has conversation context
+    # Reuse session from client so agent has conversation context
     session_id = await get_or_create_session(req.session_id, user_id=user_id)
+
+    # Inject pipeline context into the message so the orchestrator has full awareness
+    state = pipeline_state
+    context_parts = []
+    ba = state.get("business_analysis")
+    if ba:
+        context_parts.append(f"BUSINESS: {ba.get('business_name', '?')} ({ba.get('website_url', '?')})")
+        context_parts.append(f"Industry: {ba.get('industry', '?')}, Location: {ba.get('city', '?')}, {ba.get('country', '?')}")
+        context_parts.append(f"Services: {', '.join(ba.get('services', [])[:5])}")
+        context_parts.append(f"Language: {ba.get('language', '?')}")
+
+    leads = state.get("scored_leads") or state.get("leads") or []
+    pitches = state.get("pitches") or []
+    judged = state.get("judged_pitches") or []
+    agents_list = state.get("elevenlabs_agents") or []
+
+    if leads:
+        top = [f"{l.get('name', '?')} ({l.get('score_grade', '?')}, score {l.get('lead_score', '?')})" for l in leads[:10]]
+        context_parts.append(f"LEADS ({len(leads)} total, top 10): {'; '.join(top)}")
+    if pitches:
+        context_parts.append(f"PITCHES: {len(pitches)} generated")
+    if judged:
+        ready = sum(1 for j in judged if j.get("ready_to_call"))
+        context_parts.append(f"JUDGED PITCHES: {len(judged)} ({ready} ready to call)")
+    if agents_list:
+        context_parts.append(f"VOICE AGENTS: {len(agents_list)} created")
+
+    if context_parts:
+        enriched_message = f"[CURRENT PIPELINE STATE]\n" + "\n".join(context_parts) + f"\n\n[USER REQUEST]\n{message}"
+    else:
+        enriched_message = message
 
     async def event_generator():
         yield {"event": "session", "data": json.dumps({"session_id": session_id})}
         try:
-            async for event_data in stream_agent_events(session_id, message, user_id=user_id):
+            async for event_data in stream_agent_events(session_id, enriched_message, user_id=user_id):
                 yield {"event": "agent", "data": json.dumps(event_data, default=str)}
         except Exception as e:
             logger.error("Chat error: %s", e)
