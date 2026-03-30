@@ -326,12 +326,13 @@ IMPORTANT RULES:
 )
 
 # ─── 7. Voice Config Live Agent (real-time audio via Live API) ────────────
-# This is the INTERNAL Gemini native audio agent that talks to the user
+# This is the INTERNAL Gemini Live agent that talks to the user
 # in real-time to gather business info, configure the voice agent style,
 # and then creates the ElevenLabs outbound agents.
+# Uses gemini-3.1-flash-live-preview which supports audio + function calling.
 voice_config_live_agent = Agent(
     name="voice_config_live",
-    model="gemini-2.5-flash-native-audio-preview-12-2025",
+    model="gemini-3.1-flash-live-preview",
     description="Live audio agent that gathers business info via voice conversation, then creates ElevenLabs outbound call agents.",
     instruction="""You are GRAI's voice setup assistant having a LIVE VOICE CONVERSATION with a business owner.
 Your job is to understand their business, gather what's needed, and create their AI outbound calling agent.
