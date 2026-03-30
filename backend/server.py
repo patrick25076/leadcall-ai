@@ -68,6 +68,47 @@ from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.agents.live_request_queue import LiveRequestQueue
 from google.genai import types as genai_types
 
+# ─── Monkey-patch ADK to fix deprecated media_chunks for Gemini 3.1 Live ──
+# ADK issue #5018: GeminiLlmConnection.send_realtime() uses the deprecated
+# session.send(input=blob) path which sends media_chunks. Gemini 3.1+ requires
+# session.send_realtime_input(audio=blob). Patch until ADK ships the fix.
+try:
+    from google.adk.models.gemini_llm_connection import GeminiLlmConnection
+
+    _original_send_realtime = GeminiLlmConnection.send_realtime
+    _original_send_content = GeminiLlmConnection.send_content
+
+    async def _patched_send_realtime(self, input):
+        """Use send_realtime_input(audio=) instead of deprecated send(media_chunks)."""
+        if isinstance(input, genai_types.Blob):
+            await self._gemini_session.send_realtime_input(audio=input)
+        elif isinstance(input, genai_types.ActivityStart):
+            await self._gemini_session.send_realtime_input(activity_start=input)
+        elif isinstance(input, genai_types.ActivityEnd):
+            await self._gemini_session.send_realtime_input(activity_end=input)
+        else:
+            await _original_send_realtime(self, input)
+
+    async def _patched_send_content(self, content):
+        """Use send_client_content/send_tool_response instead of deprecated send()."""
+        assert content.parts
+        if content.parts[0].function_response:
+            function_responses = [part.function_response for part in content.parts]
+            await self._gemini_session.send_tool_response(
+                function_responses=function_responses
+            )
+        else:
+            await self._gemini_session.send_client_content(
+                turns=[content],
+                turn_complete=True,
+            )
+
+    GeminiLlmConnection.send_realtime = _patched_send_realtime
+    GeminiLlmConnection.send_content = _patched_send_content
+    logger.info("Patched GeminiLlmConnection for Gemini 3.1 Live API")
+except Exception as e:
+    logger.warning("Could not patch ADK send_realtime: %s", e)
+
 from agents.agent import root_agent, voice_config_live_agent, analysis_pipeline
 from agents.tools import pipeline_state, load_campaign_state, reset_pipeline_state
 from auth import AuthMiddleware
