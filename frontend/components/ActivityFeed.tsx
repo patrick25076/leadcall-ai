@@ -78,66 +78,115 @@ export default function ActivityFeed({
   const leads = (pipelineState?.scored_leads || pipelineState?.leads || []) as Record<string, unknown>[];
   const pitches = (pipelineState?.judged_pitches || pipelineState?.pitches || []) as Record<string, unknown>[];
 
+  // Determine pipeline steps from state (not SSE events)
+  const steps = [
+    {
+      key: "crawl",
+      icon: "🌐",
+      label: "Crawling website",
+      doneLabel: analysis ? `Analyzed: ${String(analysis.business_name || "Website")}` : undefined,
+      done: !!analysis,
+      active: running && !analysis,
+      details: analysis ? [
+        `Industry: ${String(analysis.industry || "Detected")}`,
+        `Location: ${String(analysis.city || "")}, ${String(analysis.country || "")}`,
+        `Language: ${String(analysis.language || "Detected")}`,
+      ] : undefined,
+    },
+    {
+      key: "leads",
+      icon: "🔍",
+      label: "Finding leads",
+      doneLabel: leads.length > 0 ? `Found ${leads.length} leads` : undefined,
+      done: leads.length > 0,
+      active: running && !!analysis && leads.length === 0,
+      details: leads.length > 0 ? [
+        `Grade A: ${leads.filter((l) => l.score_grade === "A").length}`,
+        `Grade B: ${leads.filter((l) => l.score_grade === "B").length}`,
+        `With phone: ${leads.filter((l) => l.phone).length}`,
+      ] : undefined,
+    },
+    {
+      key: "pitches",
+      icon: "✍️",
+      label: "Writing pitches & emails",
+      doneLabel: pitches.length > 0 ? `Created ${pitches.length} pitches` : undefined,
+      done: pitches.length > 0,
+      active: running && leads.length > 0 && pitches.length === 0,
+      details: pitches.length > 0 ? [
+        `Ready to call: ${pitches.filter((p) => p.ready_to_call).length}`,
+        `Ready to email: ${pitches.filter((p) => p.ready_to_email || p.email_subject).length}`,
+      ] : undefined,
+    },
+  ];
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-6">
         <div className="max-w-2xl mx-auto space-y-4">
 
-          {/* Running but no events yet */}
-          {events.length === 0 && running && (
-            <div className="text-center py-12">
-              <div className="w-10 h-10 border-2 border-emerald-500/30 border-t-emerald-500 rounded-full animate-spin mx-auto mb-4" />
-              <p className="text-zinc-300 text-lg mb-2">Analyzing your website...</p>
-              <p className="text-zinc-600 text-sm">Crawling pages, detecting business model, finding leads. This takes 1-2 minutes.</p>
-            </div>
-          )}
-
           {/* Idle / waiting */}
-          {events.length === 0 && !running && !pipelineComplete && !analysis && (
+          {!running && !pipelineComplete && !analysis && (
             <div className="text-center py-12">
               <p className="text-zinc-400 text-lg mb-2">Ready to analyze</p>
-              <p className="text-zinc-600 text-sm">Click "Re-analyze" or enter a URL to start.</p>
+              <p className="text-zinc-600 text-sm">Click &quot;Re-analyze&quot; or enter a URL to start.</p>
             </div>
           )}
 
-          {/* Milestone Cards */}
-          {analysis && (
-            <MilestoneCard
-              icon="🌐"
-              title={`Analyzed: ${(analysis.business_name as string) || "Your Business"}`}
-              details={[
-                `Industry: ${analysis.industry || "Detected"}`,
-                `Location: ${analysis.city || ""}, ${analysis.country || ""}`,
-                `Language: ${analysis.language || "Detected"}`,
-                analysis.pricing_info ? `Pricing: ${(analysis.pricing_info as string).slice(0, 60)}...` : null,
-              ].filter(Boolean) as string[]}
-            />
-          )}
+          {/* Pipeline Progress Steps — always visible while running or has data */}
+          {(running || analysis) && (
+            <div className="space-y-3">
+              {steps.map((step) => (
+                <div
+                  key={step.key}
+                  className={`flex gap-4 p-4 rounded-xl border transition-all duration-500 ${
+                    step.done
+                      ? "bg-emerald-500/5 border-emerald-500/20"
+                      : step.active
+                      ? "bg-zinc-900/80 border-emerald-500/30"
+                      : "bg-zinc-900/30 border-zinc-800/50 opacity-50"
+                  }`}
+                >
+                  {/* Icon + status */}
+                  <div className="flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-lg">
+                    {step.done ? (
+                      <div className="w-10 h-10 rounded-full bg-emerald-500/20 flex items-center justify-center">
+                        <svg className="w-5 h-5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                      </div>
+                    ) : step.active ? (
+                      <div className="w-10 h-10 rounded-full bg-zinc-800 flex items-center justify-center">
+                        <div className="w-5 h-5 border-2 border-emerald-500/30 border-t-emerald-500 rounded-full animate-spin" />
+                      </div>
+                    ) : (
+                      <div className="w-10 h-10 rounded-full bg-zinc-800/50 flex items-center justify-center text-base">
+                        {step.icon}
+                      </div>
+                    )}
+                  </div>
 
-          {leads.length > 0 && (
-            <MilestoneCard
-              icon="🔍"
-              title={`Found ${leads.length} leads`}
-              details={[
-                `Grade A: ${leads.filter((l) => l.score_grade === "A").length}`,
-                `Grade B: ${leads.filter((l) => l.score_grade === "B").length}`,
-                `With phone: ${leads.filter((l) => l.phone).length}`,
-                `With email: ${leads.filter((l) => l.email).length}`,
-              ]}
-              action={{ label: "View Leads →", onClick: () => {} }}
-            />
-          )}
-
-          {pitches.length > 0 && (
-            <MilestoneCard
-              icon="✍️"
-              title={`Created ${pitches.length} personalized pitches`}
-              details={[
-                `Ready to call: ${pitches.filter((p) => p.ready_to_call).length}`,
-                `Ready to email: ${pitches.filter((p) => p.ready_to_email).length}`,
-                `Avg score: ${(pitches.reduce((sum, p) => sum + ((p.score as number) || 0), 0) / pitches.length).toFixed(1)}/10`,
-              ]}
-            />
+                  {/* Content */}
+                  <div className="flex-1 min-w-0">
+                    <p className={`text-sm font-medium ${
+                      step.done ? "text-emerald-400" : step.active ? "text-white" : "text-zinc-500"
+                    }`}>
+                      {step.done ? step.doneLabel : step.label}
+                    </p>
+                    {step.active && (
+                      <p className="text-xs text-zinc-500 mt-0.5">Working on it...</p>
+                    )}
+                    {step.done && step.details && (
+                      <div className="flex flex-wrap gap-3 mt-1.5">
+                        {step.details.map((d, i) => (
+                          <span key={i} className="text-xs text-zinc-500">{d}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
 
           {/* Live Agent Messages */}
