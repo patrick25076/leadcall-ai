@@ -47,3 +47,5 @@ Phone_Number_Setup_Research.md
 
 # Sentry
 .env.sentry-build-plugin
+claude-session.md
+export-session.js

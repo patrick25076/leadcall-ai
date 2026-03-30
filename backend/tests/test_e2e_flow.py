@@ -90,7 +90,10 @@ class TestFullAPIFlow:
         assert resp.status_code == 200
         assert resp.json()["status"] == "reset"
 
-    def test_12_admin_stats(self):
+    def test_12_admin_stats(self, monkeypatch):
+        # Auth middleware returns "anon" (Supabase configured, no token)
+        # or "dev-user" (Supabase not configured). Allow both.
+        monkeypatch.setenv("ADMIN_USER_IDS", "anon,dev-user")
         resp = client.get("/api/admin/stats")
         assert resp.status_code == 200
         data = resp.json()

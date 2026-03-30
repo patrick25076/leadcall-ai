@@ -1012,7 +1012,6 @@ from agents.tools import (
 # Map of tool name → callable for the voice agent
 _VOICE_TOOLS = {
     "assess_voice_readiness": assess_voice_readiness,
-    "configure_voice_agent": configure_voice_agent,
     "get_voice_agent_config": get_voice_agent_config,
     "get_pipeline_state": _get_pipeline_state_tool,
     "save_preferences": _save_preferences_tool,
@@ -1024,6 +1023,51 @@ _VOICE_TOOLS = {
 
 # System instruction for the live voice agent (from agent.py)
 _VOICE_SYSTEM_INSTRUCTION = voice_config_live_agent.instruction
+
+
+def _voice_configure_voice_agent(
+    caller_name: str = "",
+    company_name_override: str = "",
+    voice_id: str = "",
+    voice_speed: float = 1.0,
+    call_style: str = "",
+    objective: str = "",
+    max_call_duration: int = 300,
+    opening_style: str = "",
+    closing_cta: str = "",
+    pricing_override: str = "",
+    additional_context: str = "",
+    business_hours: str = "",
+    availability_rules: str = "",
+    language_override: str = "",
+) -> dict:
+    """Live wrapper that exposes structured args and persists them via configure_voice_agent."""
+    config = {}
+    for key, value in {
+        "caller_name": caller_name,
+        "company_name_override": company_name_override,
+        "voice_id": voice_id,
+        "voice_speed": voice_speed,
+        "call_style": call_style,
+        "objective": objective,
+        "max_call_duration": max_call_duration,
+        "opening_style": opening_style,
+        "closing_cta": closing_cta,
+        "pricing_override": pricing_override,
+        "additional_context": additional_context,
+        "business_hours": business_hours,
+        "availability_rules": availability_rules,
+        "language_override": language_override,
+    }.items():
+        if isinstance(value, str):
+            if value.strip():
+                config[key] = value.strip()
+        elif value is not None:
+            config[key] = value
+    return configure_voice_agent(json.dumps(config))
+
+
+_VOICE_TOOLS["configure_voice_agent"] = _voice_configure_voice_agent
 
 
 def _build_voice_tool_declarations() -> list[dict]:
@@ -1039,7 +1083,9 @@ def _build_voice_tool_declarations() -> list[dict]:
         for pname, param in sig.parameters.items():
             ptype = "string"
             annotation = param.annotation
-            if annotation in (int, float):
+            if annotation is int:
+                ptype = "integer"
+            elif annotation is float:
                 ptype = "number"
             elif annotation is bool:
                 ptype = "boolean"
@@ -1086,17 +1132,14 @@ async def voice_config_ws(websocket: WebSocket, session_id: str):
         ) as live_session:
             logger.info("Voice Live session established for %s", session_id[:8])
 
-            # Send initial trigger so the agent speaks first
-            await live_session.send_client_content(
-                turns=genai_types.Content(
-                    role="user",
-                    parts=[genai_types.Part(text=(
-                        "The user just connected to the voice setup session. "
-                        "Greet them warmly, introduce yourself, and start the voice configuration process. "
-                        "Begin by calling get_pipeline_state to understand their business context."
-                    ))],
+            # Gemini 3.1 Live only supports send_client_content for initial history seeding.
+            # To prompt the model to speak first, send the opener as realtime text input.
+            await live_session.send_realtime_input(
+                text=(
+                    "The user just connected to the voice setup session. "
+                    "Greet them warmly, introduce yourself, and start the voice configuration process. "
+                    "Begin by calling get_pipeline_state to understand their business context."
                 ),
-                turn_complete=True,
             )
 
             async def upstream_task():

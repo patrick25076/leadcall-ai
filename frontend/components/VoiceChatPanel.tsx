@@ -144,7 +144,7 @@ export function VoiceChatPanel({ sessionId, onClose, onConfigSaved }: VoiceChatP
     ws.onopen = () => {
       setConnected(true);
       setError(null);
-      setTranscripts([{ author: "system", text: "Connected. Starting microphone..." }]);
+      setTranscripts([{ author: "system", text: "Connected — speak to set up your voice agent" }]);
       startMic();
     };
 

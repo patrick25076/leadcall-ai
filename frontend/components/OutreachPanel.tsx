@@ -139,17 +139,17 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
 
   const playAudio = (base64Data: string) => {
     try {
-      const bytes = atob(base64Data);
-      const buffer = new ArrayBuffer(bytes.length);
-      const view = new Uint8Array(buffer);
-      for (let i = 0; i < bytes.length; i++) {
-        view[i] = bytes.charCodeAt(i);
+      const raw = atob(base64Data);
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) {
+        bytes[i] = raw.charCodeAt(i);
       }
 
-      const float32 = new Float32Array(buffer.byteLength / 4);
-      const dataView = new DataView(buffer);
-      for (let i = 0; i < float32.length; i++) {
-        float32[i] = dataView.getFloat32(i * 4, true);
+      // Gemini Live audio chunks arrive as 16-bit PCM, not Float32 samples.
+      const int16 = new Int16Array(bytes.buffer);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) {
+        float32[i] = int16[i] / 32768;
       }
 
       const ctx = audioContextRef.current || new AudioContext({ sampleRate: 24000 });
