@@ -36,7 +36,12 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
   const [voiceTranscript, setVoiceTranscript] = useState<Array<{ role: string; text: string }>>([]);
   const [voiceStatus, setVoiceStatus] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const playbackCtxRef = useRef<AudioContext | null>(null);
+  const micCtxRef = useRef<AudioContext | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const nextPlayTimeRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const readyToCall = pitches.filter((p) => p.ready_to_call);
@@ -55,6 +60,27 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
       setSetupStep("testing");
     }
   }, [agents.length, setupStep]);
+
+  const stopMicrophone = () => {
+    processorRef.current?.disconnect();
+    sourceRef.current?.disconnect();
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    micCtxRef.current?.close();
+    processorRef.current = null;
+    sourceRef.current = null;
+    streamRef.current = null;
+    micCtxRef.current = null;
+  };
+
+  const resetPlayback = () => {
+    nextPlayTimeRef.current = 0;
+  };
+
+  const stopPlayback = () => {
+    resetPlayback();
+    playbackCtxRef.current?.close();
+    playbackCtxRef.current = null;
+  };
 
   // Start voice setup conversation
   const startVoiceSetup = async () => {
@@ -78,7 +104,7 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
       if (msg.type === "transcript") {
         setVoiceTranscript((prev) => [...prev, { role: msg.author || "agent", text: msg.text }]);
       } else if (msg.type === "audio") {
-        playAudio(msg.data);
+        playAudio(msg.data, msg.mime_type);
       } else if (msg.type === "tool_call") {
         if (msg.tool_name === "create_elevenlabs_agent") {
           setVoiceStatus("Creating voice agents...");
@@ -89,11 +115,14 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
         if (msg.tool_name === "create_elevenlabs_agent") {
           setVoiceStatus("Voice agent created!");
         }
+      } else if (msg.type === "turn_complete") {
+        resetPlayback();
       }
     };
 
     ws.onclose = () => {
       setVoiceActive(false);
+      stopMicrophone();
       // Only mark complete if we actually had a conversation
       setVoiceTranscript((prev) => {
         if (prev.length > 0) {
@@ -108,6 +137,7 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
 
     ws.onerror = () => {
       setVoiceActive(false);
+      stopMicrophone();
       setVoiceStatus("Connection error — try again");
     };
   };
@@ -115,12 +145,17 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
   const startMicrophone = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioContextRef.current = new AudioContext({ sampleRate: 16000 });
-      const source = audioContextRef.current.createMediaStreamSource(stream);
-      const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
+      streamRef.current = stream;
+
+      const ctx = new AudioContext({ sampleRate: 16000 });
+      micCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      sourceRef.current = source;
+      processorRef.current = processor;
 
       source.connect(processor);
-      processor.connect(audioContextRef.current.destination);
+      processor.connect(ctx.destination);
 
       processor.onaudioprocess = (e) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -137,8 +172,22 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
     }
   };
 
-  const playAudio = (base64Data: string) => {
+  const parseSampleRate = (mimeType?: string): number => {
+    if (!mimeType) return 24000;
+    const match = mimeType.match(/rate=(\d+)/);
+    return match ? parseInt(match[1], 10) : 24000;
+  };
+
+  const playAudio = (base64Data: string, mimeType?: string) => {
     try {
+      const rate = parseSampleRate(mimeType);
+      if (!playbackCtxRef.current || playbackCtxRef.current.sampleRate !== rate) {
+        playbackCtxRef.current?.close();
+        playbackCtxRef.current = new AudioContext({ sampleRate: rate });
+        nextPlayTimeRef.current = 0;
+      }
+      const ctx = playbackCtxRef.current;
+
       const raw = atob(base64Data);
       const bytes = new Uint8Array(raw.length);
       for (let i = 0; i < raw.length; i++) {
@@ -152,13 +201,15 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
         float32[i] = int16[i] / 32768;
       }
 
-      const ctx = audioContextRef.current || new AudioContext({ sampleRate: 24000 });
-      const audioBuffer = ctx.createBuffer(1, float32.length, 24000);
+      const audioBuffer = ctx.createBuffer(1, float32.length, rate);
       audioBuffer.getChannelData(0).set(float32);
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(ctx.destination);
-      source.start();
+
+      const startTime = Math.max(ctx.currentTime, nextPlayTimeRef.current);
+      source.start(startTime);
+      nextPlayTimeRef.current = startTime + audioBuffer.duration;
     } catch {}
   };
 
@@ -166,6 +217,8 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
     if (wsRef.current) {
       wsRef.current.close();
     }
+    stopMicrophone();
+    stopPlayback();
     setVoiceActive(false);
     if (agents.length > 0) {
       setSetupStep("testing");
