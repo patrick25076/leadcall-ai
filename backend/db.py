@@ -227,6 +227,9 @@ def get_campaign_state(campaign_id: int) -> dict:
             "call_results": call_results,
             "campaign_id": campaign_id,
             "user_id": campaign.get("user_id", "") if campaign else "",
+            "crawl_data": {},
+            "el_kb_id": campaign.get("el_kb_id", "") if campaign else "",
+            "dynamic_vars": campaign.get("dynamic_vars", {}) if campaign else {},
         }
     except Exception as e:
         logger.error("Failed to load campaign state %d: %s", campaign_id, e)
@@ -251,6 +254,9 @@ def _empty_state(campaign_id: int = 0) -> dict:
         "call_results": [],
         "campaign_id": campaign_id,
         "user_id": "",
+        "crawl_data": {},
+        "el_kb_id": "",
+        "dynamic_vars": {},
     }
 
 
@@ -600,3 +606,90 @@ def cleanup_expired_leads() -> int:
     if count > 0:
         logger.info("GDPR cleanup: deleted %d expired leads", count)
     return count
+
+
+# ─── Knowledge Base CRUD ────────────────────────────────────────────────────
+
+def update_campaign_kb_id(campaign_id: int, el_kb_id: str) -> None:
+    """Set the ElevenLabs KB ID on a campaign."""
+    if not is_configured():
+        return
+    get_db().table("campaigns").update({"el_kb_id": el_kb_id}).eq("id", campaign_id).execute()
+
+
+def get_campaign_kb_id(campaign_id: int) -> str:
+    """Get the ElevenLabs KB ID for a campaign."""
+    if not is_configured():
+        return ""
+    result = get_db().table("campaigns").select("el_kb_id").eq("id", campaign_id).execute()
+    if result.data and result.data[0].get("el_kb_id"):
+        return result.data[0]["el_kb_id"]
+    return ""
+
+
+def save_kb_document(campaign_id: int, el_kb_id: str, el_doc_id: str,
+                     doc_type: str, content_text: str, filename: str = "",
+                     content_hash: str = "", char_count: int = 0) -> int:
+    """Save a KB document record after uploading to ElevenLabs."""
+    if not is_configured():
+        return 0
+    result = get_db().table("kb_documents").insert({
+        "campaign_id": campaign_id,
+        "el_kb_id": el_kb_id,
+        "el_doc_id": el_doc_id,
+        "doc_type": doc_type,
+        "source_type": "text",
+        "filename": filename,
+        "content_text": content_text,
+        "content_hash": content_hash,
+        "char_count": char_count,
+        "status": "ready",
+    }).execute()
+    return result.data[0]["id"] if result.data else 0
+
+
+def get_kb_documents(campaign_id: int) -> list:
+    """Get all KB documents for a campaign."""
+    if not is_configured():
+        return []
+    result = get_db().table("kb_documents").select("*").eq(
+        "campaign_id", campaign_id
+    ).order("created_at").execute()
+    return result.data or []
+
+
+def get_kb_total_chars(el_kb_id: str) -> int:
+    """Get total character count across all docs in a KB."""
+    if not is_configured():
+        return 0
+    result = get_db().table("kb_documents").select("char_count").eq(
+        "el_kb_id", el_kb_id
+    ).eq("status", "ready").execute()
+    return sum(r.get("char_count", 0) for r in (result.data or []))
+
+
+# ─── Campaign Dynamic Variables ─────────────────────────────────────────────
+
+def save_campaign_dynamic_vars(campaign_id: int, vars_dict: dict) -> None:
+    """Save/merge campaign-level dynamic variables."""
+    if not is_configured():
+        return
+    # Merge with existing
+    existing = get_campaign_dynamic_vars(campaign_id)
+    existing.update(vars_dict)
+    get_db().table("campaigns").update(
+        {"dynamic_vars": json.dumps(existing)}
+    ).eq("id", campaign_id).execute()
+
+
+def get_campaign_dynamic_vars(campaign_id: int) -> dict:
+    """Get campaign-level dynamic variables."""
+    if not is_configured():
+        return {}
+    result = get_db().table("campaigns").select("dynamic_vars").eq(
+        "id", campaign_id
+    ).execute()
+    if result.data and result.data[0].get("dynamic_vars"):
+        dv = result.data[0]["dynamic_vars"]
+        return dv if isinstance(dv, dict) else json.loads(dv)
+    return {}

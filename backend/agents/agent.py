@@ -33,6 +33,11 @@ from .tools import (
     configure_voice_agent,
     get_voice_agent_config,
     send_email,
+    create_knowledge_base,
+    upload_kb_document,
+    attach_kb_to_agent,
+    read_kb_documents,
+    build_campaign_kb,
 )
 
 # ─── 1. Website Analyzer Agent ──────────────────────────────────────────────
@@ -259,6 +264,9 @@ When asked about results:
         get_call_status,
         get_pipeline_state,
         get_voice_agent_config,
+        build_campaign_kb,
+        attach_kb_to_agent,
+        read_kb_documents,
     ],
 )
 

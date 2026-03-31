@@ -1007,11 +1007,18 @@ from agents.tools import (
     create_elevenlabs_agent as _create_elevenlabs_agent_tool,
     make_outbound_call as _make_outbound_call_tool,
     get_call_status as _get_call_status_tool,
+    read_kb_documents as _read_kb_documents_tool,
+    build_campaign_kb as _build_campaign_kb_tool,
+    create_knowledge_base as _create_kb_tool,
+    upload_kb_document as _upload_kb_doc_tool,
+    attach_kb_to_agent as _attach_kb_tool,
 )
+from db import get_campaign_dynamic_vars as _get_campaign_dvars
 
 # Map of tool name → callable for the voice agent
 _VOICE_TOOLS = {
     "assess_voice_readiness": assess_voice_readiness,
+    "configure_voice_agent": configure_voice_agent,
     "get_voice_agent_config": get_voice_agent_config,
     "get_pipeline_state": _get_pipeline_state_tool,
     "save_preferences": _save_preferences_tool,
@@ -1019,6 +1026,12 @@ _VOICE_TOOLS = {
     "create_elevenlabs_agent": _create_elevenlabs_agent_tool,
     "make_outbound_call": _make_outbound_call_tool,
     "get_call_status": _get_call_status_tool,
+    "read_kb_documents": _read_kb_documents_tool,
+    "build_campaign_kb": _build_campaign_kb_tool,
+    "create_knowledge_base": _create_kb_tool,
+    "upload_kb_document": _upload_kb_doc_tool,
+    "attach_kb_to_agent": _attach_kb_tool,
+    "get_campaign_dynamic_vars": _get_campaign_dvars,
 }
 
 # System instruction for the live voice agent (from agent.py)

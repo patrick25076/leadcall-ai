@@ -155,11 +155,34 @@ CREATE TABLE IF NOT EXISTS consent_log (
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Knowledge base documents (per campaign)
+CREATE TABLE IF NOT EXISTS kb_documents (
+    id              BIGSERIAL PRIMARY KEY,
+    campaign_id     BIGINT REFERENCES campaigns(id) ON DELETE CASCADE,
+    el_kb_id        TEXT NOT NULL,
+    el_doc_id       TEXT,
+    doc_type        TEXT NOT NULL,
+    source_type     TEXT DEFAULT 'text',
+    filename        TEXT,
+    content_text    TEXT,
+    content_hash    TEXT,
+    char_count      INTEGER DEFAULT 0,
+    status          TEXT DEFAULT 'pending',
+    error_message   TEXT,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Add KB and dynamic vars columns to campaigns
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS el_kb_id TEXT;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS dynamic_vars JSONB DEFAULT '{}';
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_leads_campaign ON leads(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_leads_score ON leads(lead_score DESC);
 CREATE INDEX IF NOT EXISTS idx_pitches_campaign ON pitches(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_calls_campaign ON calls(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_campaign ON kb_documents(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_kb ON kb_documents(el_kb_id);
 CREATE INDEX IF NOT EXISTS idx_campaigns_user ON campaigns(user_id);
 CREATE INDEX IF NOT EXISTS idx_leads_user ON leads(user_id);
 CREATE INDEX IF NOT EXISTS idx_leads_expires ON leads(expires_at);
@@ -172,6 +195,7 @@ ALTER TABLE agents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE calls ENABLE ROW LEVEL SECURITY;
 ALTER TABLE email_outreach ENABLE ROW LEVEL SECURITY;
 ALTER TABLE preferences ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kb_documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE consent_log ENABLE ROW LEVEL SECURITY;
 
 -- RLS Policies: user-scoped access
@@ -212,5 +236,6 @@ CREATE POLICY "Allow all for anon" ON preferences FOR ALL USING (true) WITH CHEC
 --   USING (campaign_id IN (SELECT id FROM campaigns WHERE user_id = auth.uid()::text));
 -- CREATE POLICY "Users see own prefs" ON preferences FOR ALL
 --   USING (campaign_id IN (SELECT id FROM campaigns WHERE user_id = auth.uid()::text));
+CREATE POLICY "Allow all for anon" ON kb_documents FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all for anon" ON consent_log FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all for anon" ON domain_verifications FOR ALL USING (true) WITH CHECK (true);

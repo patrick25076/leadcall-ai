@@ -27,12 +27,15 @@ export function VoiceChatPanel({ sessionId, onClose, onConfigSaved }: VoiceChatP
   const [error, setError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const playbackCtxRef = useRef<AudioContext | null>(null);
+  const micCtxRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const playQueueRef = useRef<Float32Array[]>([]);
   const isPlayingRef = useRef(false);
+  const playbackRateRef = useRef(24000);
+  const nextPlayTimeRef = useRef(0);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll transcripts
@@ -40,48 +43,53 @@ export function VoiceChatPanel({ sessionId, onClose, onConfigSaved }: VoiceChatP
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [transcripts]);
 
-  // ─── Audio Playback ───────────────────────────────────────────────────
-  const playAudioChunk = useCallback((pcmBase64: string) => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new AudioContext({ sampleRate: 24000 });
-    }
-    const ctx = audioContextRef.current;
+  // ─── Audio Playback (schedule-based, no overlap) ────────────────────
+  const parseSampleRate = (mimeType?: string): number => {
+    if (!mimeType) return 24000;
+    const match = mimeType.match(/rate=(\d+)/);
+    return match ? parseInt(match[1], 10) : 24000;
+  };
 
-    // Decode base64 to Int16 PCM
+  const playAudioChunk = useCallback((pcmBase64: string, mimeType?: string) => {
+    const rate = parseSampleRate(mimeType);
+
+    // Create or recreate context if sample rate changed
+    if (!playbackCtxRef.current || playbackCtxRef.current.sampleRate !== rate) {
+      playbackCtxRef.current?.close();
+      playbackCtxRef.current = new AudioContext({ sampleRate: rate });
+      nextPlayTimeRef.current = 0;
+    }
+    const ctx = playbackCtxRef.current;
+    playbackRateRef.current = rate;
+
+    // Decode base64 → Int16 → Float32
     const raw = atob(pcmBase64);
     const bytes = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
     const int16 = new Int16Array(bytes.buffer);
-
-    // Convert Int16 to Float32
     const float32 = new Float32Array(int16.length);
     for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
 
-    playQueueRef.current.push(float32);
-    setAgentSpeaking(true);
-
-    if (!isPlayingRef.current) {
-      drainPlayQueue(ctx);
-    }
-  }, []);
-
-  const drainPlayQueue = useCallback((ctx: AudioContext) => {
-    if (playQueueRef.current.length === 0) {
-      isPlayingRef.current = false;
-      setAgentSpeaking(false);
-      return;
-    }
-    isPlayingRef.current = true;
-
-    const samples = playQueueRef.current.shift()!;
-    const buffer = ctx.createBuffer(1, samples.length, 24000);
-    buffer.getChannelData(0).set(samples);
+    // Schedule playback at the correct time (no overlap, no gap)
+    const buffer = ctx.createBuffer(1, float32.length, rate);
+    buffer.getChannelData(0).set(float32);
 
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(ctx.destination);
-    source.onended = () => drainPlayQueue(ctx);
-    source.start();
+
+    const now = ctx.currentTime;
+    const startTime = Math.max(now, nextPlayTimeRef.current);
+    source.start(startTime);
+    nextPlayTimeRef.current = startTime + buffer.duration;
+
+    setAgentSpeaking(true);
+    source.onended = () => {
+      // Only clear speaking state if nothing else is scheduled
+      if (ctx.currentTime >= nextPlayTimeRef.current - 0.05) {
+        setAgentSpeaking(false);
+      }
+    };
   }, []);
 
   // ─── Microphone Capture (16kHz mono PCM) ──────────────────────────────
@@ -93,7 +101,7 @@ export function VoiceChatPanel({ sessionId, onClose, onConfigSaved }: VoiceChatP
       streamRef.current = stream;
 
       const ctx = new AudioContext({ sampleRate: 16000 });
-      audioContextRef.current = audioContextRef.current || ctx;
+      micCtxRef.current = ctx;
       const source = ctx.createMediaStreamSource(stream);
       sourceRef.current = source;
 
@@ -129,9 +137,11 @@ export function VoiceChatPanel({ sessionId, onClose, onConfigSaved }: VoiceChatP
     processorRef.current?.disconnect();
     sourceRef.current?.disconnect();
     streamRef.current?.getTracks().forEach((t) => t.stop());
+    micCtxRef.current?.close();
     processorRef.current = null;
     sourceRef.current = null;
     streamRef.current = null;
+    micCtxRef.current = null;
     setListening(false);
   }, []);
 
@@ -153,7 +163,7 @@ export function VoiceChatPanel({ sessionId, onClose, onConfigSaved }: VoiceChatP
         const msg = JSON.parse(evt.data);
 
         if (msg.type === "audio") {
-          playAudioChunk(msg.data);
+          playAudioChunk(msg.data, msg.mime_type);
         } else if (msg.type === "transcript") {
           const author = msg.author === "voice_config_live" || msg.author === "voice_config_agent"
             ? "agent" : msg.author === "user" ? "you" : "agent";
@@ -168,6 +178,8 @@ export function VoiceChatPanel({ sessionId, onClose, onConfigSaved }: VoiceChatP
             onConfigSaved();
           }
         } else if (msg.type === "turn_complete") {
+          // Reset play scheduler so next turn starts cleanly
+          nextPlayTimeRef.current = 0;
           setAgentSpeaking(false);
         } else if (msg.type === "error") {
           setError(msg.message);
