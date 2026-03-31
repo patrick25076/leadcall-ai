@@ -41,6 +41,7 @@ export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl
   const [chatInput, setChatInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
+  const statePath = campaignId ? `/api/campaigns/${campaignId}/state` : "/api/state";
 
   // Restore state on mount
   useEffect(() => {
@@ -48,10 +49,6 @@ export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl
     if (savedSession) setSessionId(savedSession);
 
     // Use campaign-scoped state if we have a campaignId
-    const statePath = campaignId
-      ? `/api/campaigns/${campaignId}/state`
-      : `/api/state`;
-
     apiFetch(statePath)
       .then((r) => r.json())
       .then((state) => {
@@ -62,7 +59,7 @@ export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl
       })
       .catch((err) => { console.error("API error:", err); setError("Connection error. Check if the backend is running."); });
 
-  }, [campaignId]);
+  }, [statePath]);
 
   // Auto-start analysis when coming from onboarding with a URL
   useEffect(() => {
@@ -80,7 +77,7 @@ export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl
     let staleCount = 0;
 
     const poll = () => {
-      apiFetch("/api/state")
+      apiFetch(statePath)
         .then((r) => r.json())
         .then((state) => {
           if (!state) return;
@@ -124,7 +121,7 @@ export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl
     poll(); // Immediate first poll
     const interval = setInterval(poll, 3000);
     return () => clearInterval(interval);
-  }, [polling, activeAgent]);
+  }, [polling, activeAgent, statePath]);
 
   // SSE stream reader — reads events from the pipeline SSE stream
   const readStream = useCallback(async (response: Response) => {
@@ -135,7 +132,7 @@ export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl
 
     // Fetch latest state from the server
     const refreshState = () => {
-      apiFetch("/api/state")
+      apiFetch(statePath)
         .then((r) => r.json())
         .then((state) => {
           if (state) setPipelineState(state);
@@ -183,7 +180,7 @@ export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl
         refreshState();
       }
     }
-  }, []);
+  }, [statePath]);
 
   const startAnalysis = useCallback(async (urlOverride?: string) => {
     const targetUrl = urlOverride || loadFromStorage<string>("url", "");
@@ -418,7 +415,7 @@ export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl
             sessionId={sessionId}
             campaignId={campaignId}
             onRefreshState={() => {
-              apiFetch("/api/state")
+              apiFetch(statePath)
                 .then((r) => r.json())
                 .then((state) => { if (state) setPipelineState(state); })
                 .catch(() => {});

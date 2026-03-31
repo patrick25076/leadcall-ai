@@ -238,6 +238,10 @@ class CallRequest(BaseModel):
     phone_number: str = Field(..., max_length=20)
 
 
+class CreateVoiceAgentsRequest(BaseModel):
+    lead_names: list[str] = Field(default_factory=list)
+
+
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 def _get_user_id(request: Request) -> str:
@@ -637,6 +641,56 @@ async def save_voice_config(config: dict):
     return result
 
 
+@app.get("/api/voice-readiness")
+async def get_voice_readiness():
+    """Return current voice-agent readiness from in-memory pipeline state."""
+    from agents.tools import assess_voice_readiness
+    return assess_voice_readiness()
+
+
+@app.get("/api/campaigns/{campaign_id}/voice-readiness")
+async def get_campaign_voice_readiness(campaign_id: int, request: Request):
+    """Return current voice-agent readiness for a specific campaign."""
+    user_id = _get_user_id(request)
+    if not verify_campaign_ownership(campaign_id, user_id):
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    load_campaign_state(campaign_id)
+    pipeline_state["campaign_id"] = campaign_id
+    pipeline_state["user_id"] = user_id
+
+    from agents.tools import assess_voice_readiness
+    return assess_voice_readiness()
+
+
+@app.post("/api/voice-agents")
+async def create_voice_agents(req: CreateVoiceAgentsRequest):
+    """Create voice agents from the current in-memory pipeline state."""
+    from agents.tools import create_campaign_calling_agents
+    result = create_campaign_calling_agents(
+        selected_lead_names_json=json.dumps(req.lead_names),
+    )
+    return result
+
+
+@app.post("/api/campaigns/{campaign_id}/voice-agents")
+async def create_campaign_voice_agents(campaign_id: int, req: CreateVoiceAgentsRequest, request: Request):
+    """Create voice agents for selected leads in a specific campaign."""
+    user_id = _get_user_id(request)
+    if not verify_campaign_ownership(campaign_id, user_id):
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    load_campaign_state(campaign_id)
+    pipeline_state["campaign_id"] = campaign_id
+    pipeline_state["user_id"] = user_id
+
+    from agents.tools import create_campaign_calling_agents
+    result = create_campaign_calling_agents(
+        selected_lead_names_json=json.dumps(req.lead_names),
+    )
+    return result
+
+
 @app.post("/api/preferences")
 async def update_preferences(prefs: dict):
     """Updates preferences directly."""
@@ -749,9 +803,14 @@ async def batch_call(campaign_id: int, request: Request):
         raise HTTPException(status_code=404, detail="Campaign not found")
     body = await request.json()
     lead_ids: list[int] = body.get("lead_ids", [])
+    lead_names = {
+        str(name).strip().lower()
+        for name in (body.get("lead_names", []) or [])
+        if str(name).strip()
+    }
     delay_seconds: int = body.get("delay_seconds", 30)
 
-    if not lead_ids:
+    if not lead_ids and not lead_names:
         raise HTTPException(status_code=400, detail="No leads selected for calling")
 
     # Load campaign state to get agents and leads
@@ -767,10 +826,15 @@ async def batch_call(campaign_id: int, request: Request):
     batch_id = f"batch_{campaign_id}_{uuid.uuid4().hex[:8]}"
     calls_queued = []
 
-    for pitch in judged:
+    for idx, pitch in enumerate(judged):
         phone = pitch.get("phone_number") or ""
         lead_name = pitch.get("lead_name", "")
         if not phone:
+            continue
+        normalized_lead_name = str(lead_name).strip().lower()
+        if lead_names and normalized_lead_name not in lead_names:
+            continue
+        if lead_ids and idx not in lead_ids:
             continue
 
         # Find matching agent

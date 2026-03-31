@@ -2333,7 +2333,7 @@ def get_voice_agent_config() -> dict:
 
 
 @traced(type="tool", name="create_campaign_calling_agents")
-def create_campaign_calling_agents(max_agents: int = 0) -> dict:
+def create_campaign_calling_agents(max_agents: int = 0, selected_lead_names_json: str = "[]") -> dict:
     """Create outbound calling agents for all ready leads using saved campaign context."""
     readiness = assess_voice_readiness()
     if not readiness.get("ready_to_create_agents"):
@@ -2350,12 +2350,35 @@ def create_campaign_calling_agents(max_agents: int = 0) -> dict:
     merged_context = _merged_voice_context()
     config = get_voice_agent_config()
     ready_leads = config.get("ready_leads", [])
+    try:
+        selected_lead_names = json.loads(selected_lead_names_json) if selected_lead_names_json else []
+    except json.JSONDecodeError:
+        return {"status": "error", "error": "Invalid selected_lead_names_json format."}
+
+    selected_set = {
+        str(name).strip() for name in selected_lead_names
+        if str(name).strip()
+    }
+    if selected_set:
+        ready_leads = [
+            lead for lead in ready_leads
+            if str(lead.get("lead_name") or "").strip() in selected_set
+        ]
 
     if max_agents and max_agents > 0:
         ready_leads = ready_leads[:max_agents]
 
     if not ready_leads:
-        return {"status": "error", "error": "No ready leads available to create calling agents."}
+        return {
+            "status": "error",
+            "error": "No matching ready leads available to create calling agents.",
+            "selected_leads": sorted(selected_set),
+            "available_ready_leads": [
+                str(lead.get("lead_name") or "")
+                for lead in config.get("ready_leads", [])
+                if str(lead.get("lead_name") or "").strip()
+            ],
+        }
 
     caller_name = merged_context.get("caller_name", "").strip()
     objective = merged_context.get("objective", "").strip()
@@ -2441,6 +2464,7 @@ Rules:
         "status": "success" if created else "error",
         "created_count": len(created),
         "error_count": len(errors),
+        "selected_leads": sorted(selected_set),
         "created_agents": created,
         "errors": errors,
     }

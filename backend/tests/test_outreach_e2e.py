@@ -34,6 +34,7 @@ from agents.tools import (
     configure_voice_agent,
     assess_voice_readiness,
     get_voice_agent_config,
+    create_campaign_calling_agents,
 )
 from dynamic_vars import (
     build_call_vars,
@@ -546,6 +547,21 @@ class TestAgentCreationWithKB:
         # Verify KB docs were auto-attached using campaign_id
         mock_attach.assert_called_once_with("agent_new_123", 1)
         os.environ["ELEVENLABS_API_KEY"] = ""
+
+    def test_create_campaign_calling_agents_filters_selected_leads(self, populated_pipeline):
+        os.environ["ELEVENLABS_API_KEY"] = ""
+        configure_voice_agent(json.dumps({
+            "caller_name": "Ana",
+            "objective": "book_demo",
+        }))
+
+        result = create_campaign_calling_agents(
+            selected_lead_names_json=json.dumps(["Restaurant Caru"])
+        )
+
+        assert result["status"] == "success"
+        assert result["created_count"] == 1
+        assert result["created_agents"][0]["lead_name"] == "Restaurant Caru"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -6,6 +6,14 @@ import VoiceSelector from "./VoiceSelector";
 
 type Pitch = Record<string, unknown>;
 type Agent = Record<string, unknown>;
+type VoiceReadiness = {
+  ready_to_create_agents?: boolean;
+  missing_items?: string[];
+  critical_missing?: string[];
+  next_question_prompt?: string;
+  recommendation?: string;
+  ready_leads?: Array<Record<string, unknown>>;
+};
 
 const API = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -37,6 +45,7 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
   const [voiceActive, setVoiceActive] = useState(false);
   const [voiceTranscript, setVoiceTranscript] = useState<Array<{ role: string; text: string }>>([]);
   const [voiceStatus, setVoiceStatus] = useState("");
+  const [voiceReadiness, setVoiceReadiness] = useState<VoiceReadiness | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const playbackCtxRef = useRef<AudioContext | null>(null);
   const micCtxRef = useRef<AudioContext | null>(null);
@@ -46,8 +55,36 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
   const nextPlayTimeRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const readyToCall = pitches.filter((p) => p.ready_to_call);
+  const isPitchReadyToCall = (pitch: Pitch): boolean => {
+    if (Boolean(pitch.ready_to_call || pitch.readytocall || pitch.readyToCall)) {
+      return true;
+    }
+    const score = Number(pitch.score || 0);
+    return score >= 7 && Boolean(getPitchPhone(pitch));
+  };
+
+  const readyToCall = pitches.filter(isPitchReadyToCall);
   const readyToEmail = pitches.filter((p) => p.ready_to_email || p.email_subject);
+
+  const getPitchLeadName = (pitch: Pitch): string => String(
+    pitch.lead_name || pitch.name || pitch.lead_company || pitch.company_name || ""
+  ).trim();
+
+  const getPitchPhone = (pitch: Pitch): string => String(
+    pitch.phone_number || pitch.phone || ""
+  ).trim();
+
+  const refreshVoiceReadiness = async () => {
+    const path = campaignId
+      ? `/api/campaigns/${campaignId}/voice-readiness`
+      : "/api/voice-readiness";
+    try {
+      const resp = await apiFetch(path);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      setVoiceReadiness(data);
+    } catch {}
+  };
 
   // Auto-scroll transcript
   useEffect(() => {
@@ -62,6 +99,10 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
       setSetupStep("testing");
     }
   }, [agents.length, setupStep]);
+
+  useEffect(() => {
+    refreshVoiceReadiness();
+  }, [campaignId, pitches.length, agents.length]);
 
   const stopMicrophone = () => {
     processorRef.current?.disconnect();
@@ -116,6 +157,7 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
       } else if (msg.type === "tool_result") {
         if (msg.tool_name === "configure_voice_agent") {
           setVoiceStatus("Campaign voice config saved — next select the leads for agent creation.");
+          refreshVoiceReadiness().catch(() => {});
         }
       } else if (msg.type === "turn_complete") {
         resetPlayback();
@@ -130,6 +172,7 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
         if (prev.length > 0) {
           setVoiceStatus("Voice setup complete");
           setSetupStep("creating");
+          refreshVoiceReadiness().catch(() => {});
         } else {
           setVoiceStatus("Connection closed — try again");
         }
@@ -229,42 +272,78 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
     }
   };
 
-  // Use text chat to create agents (fallback if voice doesn't work)
+  const reviewSetupStatus = () => {
+    setSetupStep("creating");
+    refreshVoiceReadiness().catch(() => {});
+  };
+
   const createAgentsViaChat = async () => {
     const leadsToCreate = selectedLeads.size > 0
-      ? Array.from(selectedLeads).map((i) => String(readyToCall[i]?.lead_name)).filter(Boolean)
-      : readyToCall.map((p) => String(p.lead_name));
+      ? Array.from(selectedLeads).map((i) => getPitchLeadName(readyToCall[i])).filter(Boolean)
+      : readyToCall.map((p) => getPitchLeadName(p)).filter(Boolean);
+
+    if (leadsToCreate.length === 0) {
+      setVoiceStatus("No valid lead names were found for agent creation.");
+      return;
+    }
 
     setVoiceStatus(`Creating ${leadsToCreate.length} agent${leadsToCreate.length !== 1 ? "s" : ""}...`);
     try {
-      const resp = await apiFetch("/api/chat", {
+      const path = campaignId
+        ? `/api/campaigns/${campaignId}/voice-agents`
+        : "/api/voice-agents";
+      const resp = await apiFetch(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message: `Create ElevenLabs voice agents for these specific leads only: ${leadsToCreate.join(", ")}. Use the business analysis and voice config we already have.`,
-          session_id: sessionId,
+          lead_names: leadsToCreate,
         }),
       });
-      // Read stream for completion
-      const reader = resp.body?.getReader();
-      if (reader) {
-        while (true) {
-          const { done } = await reader.read();
-          if (done) break;
+
+      const data = await resp.json();
+      if (!resp.ok || data.status !== "success") {
+        const details = data.next_question_prompt || data.error || data.detail || "Agent creation failed.";
+        const extraLines = [
+          Array.isArray(data.missing_items) && data.missing_items.length > 0
+            ? `Missing: ${data.missing_items.join("; ")}`
+            : "",
+          Array.isArray(data.available_ready_leads) && data.available_ready_leads.length > 0
+            ? `Backend ready leads: ${data.available_ready_leads.join(", ")}`
+            : "",
+        ].filter(Boolean);
+        await refreshVoiceReadiness();
+        setVoiceStatus(String(details));
+        if (extraLines.length > 0) {
+          setVoiceStatus(`${String(details)}\n${extraLines.join("\n")}`);
         }
+        return;
       }
-      // Refresh state to pick up newly created agents
+
       onRefreshState?.();
-      // Poll a few times to ensure agents appear in state
+      await refreshVoiceReadiness();
       let polls = 0;
       const pollInterval = setInterval(() => {
         onRefreshState?.();
         polls++;
         if (polls >= 5) clearInterval(pollInterval);
-      }, 2000);
-      setSetupStep("testing");
-      setVoiceStatus("Agents created! Test them below.");
-    } catch {
+      }, 1500);
+
+      const createdCount = Number(data.created_count || 0);
+      const errorCount = Number(data.error_count || 0);
+      if (createdCount > 0) {
+        setSetupStep("testing");
+        setVoiceStatus(
+          errorCount > 0
+            ? `Created ${createdCount} agent(s), ${errorCount} failed.`
+            : `Created ${createdCount} voice agent${createdCount !== 1 ? "s" : ""}.`
+        );
+      } else {
+        setVoiceStatus(
+          String(data.error || "No agents were created.")
+        );
+      }
+    } catch (err) {
+      console.error("Create agents error:", err);
       setVoiceStatus("Failed to create agents. Try again.");
     }
   };
@@ -395,10 +474,10 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
                 Start Voice Setup
               </button>
               <button
-                onClick={createAgentsViaChat}
+                onClick={reviewSetupStatus}
                 className="text-zinc-500 text-sm py-2 hover:text-zinc-300 transition-colors"
               >
-                Or set up via text instead
+                Skip call and review setup status
               </button>
             </div>
           </div>
@@ -464,6 +543,30 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
               </p>
             </div>
 
+            {voiceReadiness && !voiceReadiness.ready_to_create_agents && (
+              <div className="mb-4 rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
+                <p className="text-sm font-medium text-amber-300 mb-2">Agent creation is still blocked</p>
+                {voiceReadiness.missing_items && voiceReadiness.missing_items.length > 0 && (
+                  <div className="space-y-1">
+                    {voiceReadiness.missing_items.map((item) => (
+                      <p key={item} className="text-xs text-amber-100/80">{item}</p>
+                    ))}
+                  </div>
+                )}
+                {voiceReadiness.next_question_prompt && (
+                  <p className="text-xs text-zinc-300 mt-3">Ask next: {voiceReadiness.next_question_prompt}</p>
+                )}
+              </div>
+            )}
+
+            {voiceReadiness?.ready_leads && voiceReadiness.ready_leads.length > 0 && (
+              <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                <p className="text-xs text-zinc-400">
+                  Backend sees {voiceReadiness.ready_leads.length} ready lead{voiceReadiness.ready_leads.length !== 1 ? "s" : ""} for voice agents.
+                </p>
+              </div>
+            )}
+
             {readyToCall.length > 0 && (
               <div className="mb-4">
                 <div className="flex items-center justify-between mb-2">
@@ -505,8 +608,8 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
                         className="accent-emerald-500"
                       />
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm text-white font-medium truncate">{String(p.lead_name)}</p>
-                        <p className="text-xs text-zinc-500 truncate">{String(p.phone || "No phone")}</p>
+                        <p className="text-sm text-white font-medium truncate">{getPitchLeadName(p) || "Unnamed lead"}</p>
+                        <p className="text-xs text-zinc-500 truncate">{getPitchPhone(p) || "No phone"}</p>
                       </div>
                       {p.score != null && (
                         <span className="text-xs text-zinc-500">{String(p.score)}/10</span>
@@ -519,13 +622,13 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
 
             <button
               onClick={createAgentsViaChat}
-              disabled={selectedLeads.size === 0}
+              disabled={readyToCall.length === 0}
               className="w-full bg-emerald-600 text-white font-medium py-3 px-8 rounded-xl hover:bg-emerald-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              Create {selectedLeads.size} Voice Agent{selectedLeads.size !== 1 ? "s" : ""}
+              Create {selectedLeads.size || readyToCall.length} Voice Agent{(selectedLeads.size || readyToCall.length) !== 1 ? "s" : ""}
             </button>
             {voiceStatus && (
-              <p className="text-zinc-500 text-xs mt-3 text-center">{voiceStatus}</p>
+              <p className="text-zinc-500 text-xs mt-3 whitespace-pre-wrap">{voiceStatus}</p>
             )}
           </div>
         )}
@@ -619,14 +722,14 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
                       setBatchStatus("Launching calls...");
                       // Approve all if none explicitly approved
                       const toCall = approvedLeads.size > 0
-                        ? readyToCall.filter((p) => approvedLeads.has(String(p.lead_name)))
+                        ? readyToCall.filter((p) => approvedLeads.has(getPitchLeadName(p)))
                         : readyToCall;
                       try {
                         const resp = await apiFetch(`/api/campaigns/${campaignId}/batch-call`, {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({
-                            lead_ids: toCall.map((_, i) => i),
+                            lead_names: toCall.map((p) => getPitchLeadName(p)).filter(Boolean),
                             delay_seconds: 30,
                           }),
                         });
@@ -650,9 +753,9 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
                 </div>
               ) : null}
 
-              <div className="space-y-2">
-                {readyToCall.map((p, i) => {
-                  const name = String(p.lead_name);
+                <div className="space-y-2">
+                  {readyToCall.map((p, i) => {
+                  const name = getPitchLeadName(p) || "Unnamed lead";
                   const isApproved = approvedLeads.has(name);
                   return (
                     <div key={i} className={`flex items-center gap-4 p-3 rounded-lg transition-colors ${
