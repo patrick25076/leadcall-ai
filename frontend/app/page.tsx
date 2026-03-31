@@ -22,7 +22,10 @@ export default function Home() {
   useEffect(() => {
     async function checkCampaigns(): Promise<boolean> {
       try {
-        const resp = await apiFetch("/api/campaigns");
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        const resp = await apiFetch("/api/campaigns", { signal: controller.signal });
+        clearTimeout(timeout);
         if (resp.ok) {
           const data = await resp.json();
           const campaigns = data.campaigns || data || [];
@@ -31,7 +34,7 @@ export default function Home() {
             return true;
           }
         }
-      } catch { /* fall through */ }
+      } catch { /* timeout or network error — fall through */ }
       return false;
     }
 
@@ -43,7 +46,14 @@ export default function Home() {
       } else {
         setView("onboarding");
       }
+    }).catch(() => {
+      setView("onboarding");
     });
+
+    // Failsafe: if still loading after 10s, go to onboarding
+    const failsafe = setTimeout(() => {
+      if (viewRef.current === "loading") setView("onboarding");
+    }, 10000);
 
     // Listen for auth state changes (handles OAuth redirects, token refresh, delayed session restore)
     // Only act when user is still on loading/onboarding — don't disrupt dashboard/campaigns views
@@ -58,7 +68,10 @@ export default function Home() {
       }
     );
 
-    return () => subscription.unsubscribe();
+    return () => {
+      subscription.unsubscribe();
+      clearTimeout(failsafe);
+    };
   }, []);
 
   const [autoAnalyzeUrl, setAutoAnalyzeUrl] = useState<string | null>(null);
