@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { supabase } from "@/lib/supabase";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -48,7 +49,12 @@ export default function CampaignList({
 
   const fetchCampaigns = useCallback(async () => {
     try {
-      const resp = await fetch(`${API}/api/campaigns`);
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: Record<string, string> = {};
+      if (session?.access_token) {
+        headers["Authorization"] = `Bearer ${session.access_token}`;
+      }
+      const resp = await fetch(`${API}/api/campaigns`, { headers });
       if (resp.ok) {
         const data = await resp.json();
         setCampaigns(data.campaigns || []);
@@ -196,7 +202,12 @@ export default function CampaignList({
                         e.stopPropagation();
                         if (!confirm("Delete this campaign and all its data? This cannot be undone.")) return;
                         try {
-                          await fetch(`${API}/api/campaigns/${c.id}`, { method: "DELETE" });
+                          const { data: { session } } = await supabase.auth.getSession();
+                          const headers: Record<string, string> = {};
+                          if (session?.access_token) {
+                            headers["Authorization"] = `Bearer ${session.access_token}`;
+                          }
+                          await fetch(`${API}/api/campaigns/${c.id}`, { method: "DELETE", headers });
                           fetchCampaigns();
                         } catch {}
                       }}

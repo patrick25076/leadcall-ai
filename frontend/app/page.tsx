@@ -2,7 +2,7 @@
 
 export const dynamic = "force-dynamic";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import OnboardingWizard, { type OnboardingConfig } from "@/components/OnboardingWizard";
 import Dashboard from "@/components/Dashboard";
 import CampaignList from "@/components/CampaignList";
@@ -15,35 +15,53 @@ type View = "loading" | "onboarding" | "campaigns" | "dashboard";
 export default function Home() {
   const [view, setView] = useState<View>("loading");
   const [activeCampaignId, setActiveCampaignId] = useState<number | null>(null);
+  const viewRef = useRef<View>("loading");
+
+  // Keep ref in sync so the auth listener can read current view
+  useEffect(() => { viewRef.current = view; }, [view]);
 
   useEffect(() => {
+    async function checkCampaigns(accessToken: string): Promise<boolean> {
+      try {
+        const resp = await fetch(`${API}/api/campaigns`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          const campaigns = data.campaigns || data || [];
+          if (Array.isArray(campaigns) && campaigns.length > 0) {
+            setView("campaigns");
+            return true;
+          }
+        }
+      } catch { /* fall through */ }
+      return false;
+    }
+
+    // Initial session check
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (session?.user) {
-        // Check backend for existing campaigns to determine new vs returning user
-        try {
-          const resp = await fetch(`${API}/api/campaigns`, {
-            headers: {
-              Authorization: `Bearer ${session.access_token}`,
-            },
-          });
-          if (resp.ok) {
-            const data = await resp.json();
-            const campaigns = data.campaigns || data || [];
-            if (Array.isArray(campaigns) && campaigns.length > 0) {
-              setView("campaigns");
-            } else {
-              setView("onboarding");
-            }
-          } else {
-            setView("onboarding");
-          }
-        } catch {
-          setView("onboarding");
-        }
+        const hasCampaigns = await checkCampaigns(session.access_token);
+        if (!hasCampaigns) setView("onboarding");
       } else {
         setView("onboarding");
       }
     });
+
+    // Listen for auth state changes (handles OAuth redirects, token refresh, delayed session restore)
+    // Only act when user is still on loading/onboarding — don't disrupt dashboard/campaigns views
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (_event, session) => {
+        const current = viewRef.current;
+        if (current !== "loading" && current !== "onboarding") return;
+        if (session?.user) {
+          const hasCampaigns = await checkCampaigns(session.access_token);
+          if (!hasCampaigns) setView("onboarding");
+        }
+      }
+    );
+
+    return () => subscription.unsubscribe();
   }, []);
 
   const [autoAnalyzeUrl, setAutoAnalyzeUrl] = useState<string | null>(null);
