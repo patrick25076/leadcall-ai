@@ -7,6 +7,7 @@ type Step = "auth" | "website" | "email" | "phone" | "done";
 
 interface OnboardingWizardProps {
   onComplete: (config: OnboardingConfig) => void;
+  onHasCampaigns?: () => void;
 }
 
 export interface OnboardingConfig {
@@ -20,7 +21,7 @@ export interface OnboardingConfig {
 
 const API = process.env.NEXT_PUBLIC_API_URL || "";
 
-export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
+export default function OnboardingWizard({ onComplete, onHasCampaigns }: OnboardingWizardProps) {
   const [step, setStep] = useState<Step>("auth");
   const [user, setUser] = useState<{ id: string; email: string } | null>(null);
 
@@ -46,22 +47,41 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
 
   // Check for existing session on mount
   useEffect(() => {
+    async function handleAuth(session: { user: { id: string; email?: string }; access_token: string }) {
+      setUser({ id: session.user.id, email: session.user.email || "" });
+      // If caller provided onHasCampaigns, check if user already has campaigns
+      if (onHasCampaigns) {
+        try {
+          const resp = await fetch(`${API}/api/campaigns`, {
+            headers: { Authorization: `Bearer ${session.access_token}` },
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            const campaigns = data.campaigns || data || [];
+            if (Array.isArray(campaigns) && campaigns.length > 0) {
+              onHasCampaigns();
+              return;
+            }
+          }
+        } catch { /* fall through to onboarding */ }
+      }
+      setStep("website");
+    }
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) {
-        setUser({ id: session.user.id, email: session.user.email || "" });
-        setStep("website");
+        handleAuth(session);
       }
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session?.user) {
-        setUser({ id: session.user.id, email: session.user.email || "" });
-        setStep("website");
+        handleAuth(session);
       }
     });
 
     return () => subscription.unsubscribe();
-  }, []);
+  }, [onHasCampaigns]);
 
   // Sign up / Login with Google
   const handleGoogleAuth = async () => {

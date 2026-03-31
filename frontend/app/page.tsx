@@ -2,7 +2,7 @@
 
 export const dynamic = "force-dynamic";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import OnboardingWizard, { type OnboardingConfig } from "@/components/OnboardingWizard";
 import Dashboard from "@/components/Dashboard";
 import CampaignList from "@/components/CampaignList";
@@ -93,6 +93,10 @@ export default function Home() {
     setView("onboarding");
   };
 
+  const handleHasCampaigns = useCallback(() => {
+    setView("campaigns");
+  }, []);
+
   const handleBackToCampaigns = () => {
     setActiveCampaignId(null);
     setView("campaigns");
@@ -107,7 +111,12 @@ export default function Home() {
   }
 
   if (view === "onboarding") {
-    return <OnboardingWizard onComplete={handleOnboardingComplete} />;
+    return (
+      <OnboardingWizard
+        onComplete={handleOnboardingComplete}
+        onHasCampaigns={handleHasCampaigns}
+      />
+    );
   }
 
   if (view === "campaigns") {
