@@ -378,7 +378,20 @@ def save_business_analysis(analysis_json: str) -> dict:
         if cid:
             update_campaign_analysis(cid, analysis.get("business_name", ""), analysis)
 
-        return {"status": "success", "message": "Business analysis saved", "data": analysis}
+        # Auto-build Knowledge Base from crawl data if available
+        kb_status = None
+        if pipeline_state.get("crawl_data") and os.getenv("ELEVENLABS_API_KEY", ""):
+            try:
+                kb_status = build_campaign_kb(cid)
+                logger.info("Auto-built KB after analysis: %s", kb_status.get("status"))
+            except Exception as kb_err:
+                logger.warning("Auto KB build failed (non-critical): %s", kb_err)
+
+        result = {"status": "success", "message": "Business analysis saved", "data": analysis}
+        if kb_status and kb_status.get("status") == "success":
+            result["kb_id"] = kb_status.get("kb_id")
+            result["kb_docs_uploaded"] = kb_status.get("total_docs", 0)
+        return result
     except json.JSONDecodeError as e:
         return {"status": "error", "error": f"Invalid JSON: {e}"}
 
