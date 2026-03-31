@@ -73,7 +73,15 @@ from db import (
     get_prefs_db,
     get_campaign_state,
     _empty_state,
+    update_campaign_kb_id,
+    get_campaign_kb_id,
+    save_kb_document,
+    get_kb_documents,
+    get_kb_total_chars,
+    save_campaign_dynamic_vars,
+    get_campaign_dynamic_vars,
 )
+import db
 
 
 # ─── Campaign-scoped state (DB-backed with in-memory cache) ────────────────
