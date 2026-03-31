@@ -1,6 +1,6 @@
 import { logger, task, metadata } from "@trigger.dev/sdk/v3";
 
-const API_URL = process.env.GRAI_API_URL || "https://leadcall-ai.onrender.com";
+const API_URL = process.env.GRAI_API_URL || "https://grai.run";
 const API_KEY = process.env.GRAI_INTERNAL_KEY || "";
 
 async function apiCall(path: string, method = "GET", body?: Record<string, unknown>) {

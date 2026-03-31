@@ -1,6 +1,6 @@
 import { logger, task, metadata, schedules } from "@trigger.dev/sdk/v3";
 
-const API_URL = process.env.GRAI_API_URL || "https://leadcall-ai.onrender.com";
+const API_URL = process.env.GRAI_API_URL || "https://grai.run";
 const EL_API_KEY = process.env.ELEVENLABS_API_KEY || "";
 
 /**
