@@ -49,3 +49,5 @@ Phone_Number_Setup_Research.md
 .env.sentry-build-plugin
 claude-session.md
 export-session.js
+
+.trigger
