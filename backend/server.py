@@ -550,7 +550,23 @@ async def chat(req: ChatRequest, request: Request):
 async def list_campaigns(request: Request):
     """List all campaigns for the authenticated user."""
     user_id = _get_user_id(request)
+    logger.info("Listing campaigns for user_id=%s", user_id)
     campaigns = get_campaigns_for_user(user_id)
+    # If user has no campaigns under their ID, check for unclaimed campaigns
+    # (created before auth was fully wired up with user_id=anon/dev-user/empty/null)
+    if not campaigns and user_id not in ("anon", "dev-user", ""):
+        from db import get_db, is_configured
+        if is_configured():
+            unclaimed = get_db().table("campaigns").select("id").or_(
+                "user_id.is.null,user_id.eq.,user_id.eq.anon,user_id.eq.dev-user"
+            ).execute()
+            if unclaimed.data:
+                ids = [r["id"] for r in unclaimed.data]
+                logger.info("Claiming %d unclaimed campaigns for user %s", len(ids), user_id)
+                get_db().table("campaigns").update(
+                    {"user_id": user_id}
+                ).in_("id", ids).execute()
+                campaigns = get_campaigns_for_user(user_id)
     return {"campaigns": campaigns}
 
 
