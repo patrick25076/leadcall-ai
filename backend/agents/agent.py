@@ -32,6 +32,7 @@ from .tools import (
     assess_voice_readiness,
     configure_voice_agent,
     get_voice_agent_config,
+    create_campaign_calling_agents,
     send_email,
     submit_batch_calls,
     get_batch_call_status,
@@ -239,17 +240,8 @@ When asked to set up/create voice agents:
 1. Use get_voice_agent_config to get the saved voice configuration AND ready leads.
 2. Use get_pipeline_state to review current pipeline data.
 3. Extract from voice config: caller_name, call_style, objective, closing_cta, pricing_override, language.
-4. For each ready lead, create an ElevenLabs agent with create_elevenlabs_agent:
-   - agent_name: "SDR for [Lead Name]"
-   - first_message: Use the contact_person dynamic variable — write the greeting IN THE DETECTED LANGUAGE.
-     Include the caller_name from voice config.
-   - system_prompt: Include the full pitch with dynamic variables for personalization.
-     Incorporate the call_style, objective, and closing_cta from voice config.
-     If pricing_override was provided, use that instead of website pricing.
-     Write ALL instructions in the DETECTED LANGUAGE.
-   - Pass ALL personalization fields: lead_name, lead_company, lead_industry,
-     contact_person, your_company, your_services, pitch_script, call_objective, language
-   - Set language parameter to the detected language_code (e.g. "ro", "en", "de")
+4. Prefer create_campaign_calling_agents to build all ready lead agents from the saved campaign config.
+   Only use create_elevenlabs_agent directly if the user asks for a single custom agent.
 
 5. Report back what agents were created with their dynamic variables.
 
@@ -269,6 +261,7 @@ When asked about results:
         build_campaign_kb,
         attach_kb_to_agent,
         read_kb_documents,
+        create_campaign_calling_agents,
         submit_batch_calls,
         get_batch_call_status,
     ],
@@ -315,8 +308,7 @@ Based on the readiness report, ask the user about (one or two at a time):
 Once you have all info, use configure_voice_agent to save. Present a summary to the user.
 
 **STEP 4 — CREATE AGENTS (if confirmed):**
-If the user confirms, create ElevenLabs agents for each ready lead using create_elevenlabs_agent.
-Write all agent content IN THE DETECTED LANGUAGE.
+If the user confirms, use create_campaign_calling_agents to build the ready lead agents from the saved config.
 
 IMPORTANT RULES:
 - NEVER create agents without first gathering caller_name and objective
@@ -331,6 +323,7 @@ IMPORTANT RULES:
         save_preferences,
         get_preferences,
         create_elevenlabs_agent,
+        create_campaign_calling_agents,
         make_outbound_call,
         get_call_status,
         send_email,
@@ -359,6 +352,7 @@ Call get_pipeline_state and assess_voice_readiness to see what we already know.
 - We already generated pitches
 - We need to fill in gaps for the voice agent
 After getting the state, briefly summarize: "Great, I can see your business is [name], you have [N] leads ready..."
+Use assess_voice_readiness.question_plan and next_question_prompt to decide what to ask next.
 
 STEP 1.5 — REVIEW KNOWLEDGE BASE:
 Call read_kb_documents to see what business content was uploaded to the knowledge base.
@@ -367,6 +361,7 @@ If no KB exists, call build_campaign_kb to create one from the website data.
 
 STEP 2 — GATHER MISSING CAMPAIGN VARIABLES (ask ONE question at a time):
 Call get_campaign_dynamic_vars to see what's already set. Only ask for what's MISSING.
+Prefer the next required question from assess_voice_readiness.next_question_prompt.
 
 Required (MUST ask if missing):
 - caller_name: "What name should the AI use when calling? Like 'Hi, this is Maria from [company]'"
@@ -383,17 +378,12 @@ Speak in the SAME LANGUAGE as the business (detected from website analysis).
 Keep responses to 1-2 SHORT sentences. This is a phone call, not an email.
 
 STEP 3 — SAVE CONFIG:
-Once you have everything, call configure_voice_agent with ALL gathered info as JSON.
+Once you have enough information, call configure_voice_agent with the gathered structured fields.
 Confirm back: "Perfect, I've saved your settings. [brief summary]. Want me to create the calling agent now?"
 
 STEP 4 — CREATE ELEVENLABS AGENT:
-If user says yes, call get_voice_agent_config to get the ready leads.
-Then call create_elevenlabs_agent with:
-- Personalized first_message using the contact_person variable and caller_name
-- System prompt incorporating pitch_script, call_style, objective
-- All dynamic variables for per-lead personalization
-- Language set to detected language
-The knowledge base will be auto-attached to the agent.
+If user says yes, call create_campaign_calling_agents.
+This tool uses the saved config, ready leads, pitches, and KB automatically.
 
 Report: "Done! I created your voice agent with [N] leads ready. The agent has access to your full business knowledge base. Want to test a call?"
 
@@ -415,6 +405,7 @@ RULES:
         save_preferences,
         get_preferences,
         create_elevenlabs_agent,
+        create_campaign_calling_agents,
         make_outbound_call,
         get_call_status,
         read_kb_documents,

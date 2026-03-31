@@ -125,6 +125,30 @@ def _campaign_id() -> int:
     return 0
 
 
+def _merged_voice_context() -> dict:
+    """Return merged voice config from campaign dynamic vars, preferences, and analysis."""
+    cid = _campaign_id()
+    campaign_vars = get_campaign_dynamic_vars(cid) if cid else {}
+    prefs = pipeline_state.get("preferences", {}) or {}
+    voice_cfg = prefs.get("voice_config", {}) or {}
+    analysis = pipeline_state.get("business_analysis", {}) or {}
+
+    merged = {}
+    for source in (campaign_vars, prefs, voice_cfg):
+        for key, value in (source or {}).items():
+            if isinstance(value, str):
+                if value.strip():
+                    merged[key] = value.strip()
+            elif value is not None:
+                merged[key] = value
+
+    pricing_info = analysis.get("pricing_info", "")
+    if pricing_info and str(pricing_info).lower() not in ("not found", "n/a", "none", ""):
+        merged.setdefault("website_pricing", pricing_info)
+
+    return merged
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. WEBSITE ANALYZER TOOLS — Multi-page crawling
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1200,6 +1224,7 @@ def create_elevenlabs_agent(
     """
     api_key = os.getenv("ELEVENLABS_API_KEY", "")
     prefs = pipeline_state.get("preferences", {})
+    voice_context = _merged_voice_context()
 
     # Build dynamic variables map
     dynamic_variables = {
@@ -1211,7 +1236,7 @@ def create_elevenlabs_agent(
         "your_services": your_services or ", ".join((pipeline_state.get("business_analysis", {}) or {}).get("services", [])),
         "pitch_script": pitch_script,
         "call_objective": call_objective or prefs.get("objective", "Book a demo meeting"),
-        "call_style": prefs.get("call_style", "professional"),
+        "call_style": voice_context.get("call_style") or prefs.get("call_style", "professional"),
     }
 
     # Ensure first_message and system_prompt use {{variable}} template syntax
@@ -1264,6 +1289,7 @@ RULES:
         voice_cfg = prefs.get("voice_config", {})
         voice_id = voice_cfg.get("voice_id", "JBFqnCBsd6RMkjVDRZzb")
         objective_label = voice_cfg.get("objective", call_objective or "book_demo")
+        llm_id = os.getenv("ELEVENLABS_AGENT_LLM", "gemini-2.0-flash-001")
 
         # Build evaluation criteria based on call objective
         evaluation_criteria = [
@@ -1334,13 +1360,18 @@ RULES:
                 "agent": {
                     "prompt": {
                         "prompt": system_prompt,
+                        "llm": llm_id,
                     },
                     "first_message": first_message,
                     "language": language,
+                    "dynamic_variables": {
+                        "dynamic_variable_placeholders": dynamic_variables,
+                    },
                 },
                 "asr": {
                     "quality": "high",
                     "provider": "elevenlabs",
+                    "user_input_audio_format": "pcm_16000",
                     "keywords": [
                         contact_person, lead_company, lead_name,
                         your_company,
@@ -1349,22 +1380,16 @@ RULES:
                 "tts": {
                     "voice_id": voice_id,
                     "model_id": "eleven_flash_v2_5",
+                    "agent_output_audio_format": "pcm_16000",
                     "optimize_streaming_latency": 3,
+                    "speed": float(voice_cfg.get("voice_speed", 1.0)),
                 },
                 "turn": {
-                    "mode": "turn_based",
                     "turn_timeout": 10,
+                    "turn_eagerness": "patient",
                 },
                 "conversation": {
                     "max_duration_seconds": int(voice_cfg.get("max_call_duration", 300)),
-                },
-                "voicemail_detection": {
-                    "enabled": True,
-                    "voicemail_action": voice_cfg.get("voicemail_action", "leave_message"),
-                    "voicemail_message": voice_cfg.get("voicemail_message", "")
-                        or f"Hi, this is {dynamic_variables.get('your_company', 'GRAI')}. "
-                           f"I was calling regarding a potential business opportunity. "
-                           f"Please call us back at your convenience. Thank you.",
                 },
             },
             "analysis": {
@@ -1407,8 +1432,12 @@ RULES:
                 logger.info("Auto-attached %d KB docs to agent %s: %s", len(kb_docs), agent_id, kb_result.get("status"))
 
         return {"status": "success", "agent_id": agent_id, "dynamic_variables": dynamic_variables}
+    except httpx.HTTPStatusError as e:
+        body = (e.response.text or "")[:1000]
+        logger.error("Tool error creating ElevenLabs agent: %s | body=%s", e, body)
+        return {"status": "error", "error": f"ElevenLabs agent creation failed: {body or str(e)}"}
     except Exception as e:
-        logger.error("Tool error: %s", e)
+        logger.error("Tool error creating ElevenLabs agent: %s", e)
         return {"status": "error", "error": "Operation failed. Check logs for details."}
 
 
@@ -1916,6 +1945,7 @@ def assess_voice_readiness() -> dict:
     analysis = pipeline_state.get("business_analysis")
     judged = pipeline_state.get("judged_pitches", [])
     prefs = pipeline_state.get("preferences", {})
+    voice_context = _merged_voice_context()
     agents = pipeline_state.get("elevenlabs_agents", [])
 
     checklist = {}
@@ -1931,8 +1961,6 @@ def assess_voice_readiness() -> dict:
         pricing = analysis.get("pricing_info", "")
         has_pricing = bool(pricing) and str(pricing).lower() not in ("not found", "n/a", "none", "")
         checklist["pricing_available"] = has_pricing
-        if not has_pricing:
-            missing.append("pricing_info — no pricing found on website, ask the user for their pricing/packages")
 
         checklist["summary"] = bool(analysis.get("summary"))
         checklist["key_differentiators"] = bool(analysis.get("key_differentiators"))
@@ -2012,26 +2040,92 @@ def assess_voice_readiness() -> dict:
         checklist["all_have_contact_person"] = len(ready_pitches) > 0
 
     # Preferences
-    checklist["call_style_set"] = bool(prefs.get("call_style"))
-    checklist["objective_set"] = bool(prefs.get("objective"))
-    checklist["caller_name_set"] = bool(prefs.get("caller_name"))
+    caller_name = voice_context.get("caller_name") or prefs.get("caller_name")
+    objective = voice_context.get("objective") or prefs.get("objective")
+    pricing_override = voice_context.get("pricing_override") or voice_context.get("pricing_info")
+    call_style = voice_context.get("call_style") or prefs.get("call_style")
+    closing_cta = voice_context.get("closing_cta")
+    business_hours = voice_context.get("business_hours")
+    availability_rules = voice_context.get("availability_rules")
+    additional_context = voice_context.get("additional_context")
 
-    if not prefs.get("caller_name"):
+    checklist["call_style_set"] = bool(call_style)
+    checklist["objective_set"] = bool(objective)
+    checklist["caller_name_set"] = bool(caller_name)
+    checklist["closing_cta_set"] = bool(closing_cta)
+    checklist["business_hours_set"] = bool(business_hours)
+    checklist["availability_rules_set"] = bool(availability_rules)
+    checklist["additional_context_set"] = bool(additional_context)
+
+    if not caller_name:
         missing.append("caller_name — who is making the call? Need a name for the agent to use")
-    if not prefs.get("objective"):
+    if not objective:
         missing.append("objective — what's the call goal? (book demo, qualify lead, schedule visit)")
+    if not checklist.get("pricing_available", False) and not pricing_override:
+        missing.append("pricing_override — pricing was not found on the website, ask the user what pricing/packages the agent may mention")
 
     # Voice config
-    checklist["voice_id_set"] = bool(prefs.get("voice_id"))
-    checklist["voice_speed_set"] = bool(prefs.get("voice_speed"))
+    checklist["voice_id_set"] = bool(voice_context.get("voice_id") or prefs.get("voice_id"))
+    checklist["voice_speed_set"] = bool(voice_context.get("voice_speed") or prefs.get("voice_speed"))
 
     # Existing agents
     checklist["agents_already_created"] = len(agents)
 
-    # Overall readiness — only business_analysis and caller_name are truly critical
-    # Ready pitches are nice-to-have; agents can still be created for testing without them
-    critical_missing = [m for m in missing if any(k in m for k in ["business_analysis", "caller_name"])]
-    is_ready = len(critical_missing) == 0
+    question_plan = []
+    if not caller_name:
+        question_plan.append({
+            "key": "caller_name",
+            "priority": "required",
+            "prompt": "What name should the AI use when it introduces itself on calls?",
+        })
+    if not objective:
+        question_plan.append({
+            "key": "objective",
+            "priority": "required",
+            "prompt": "What is the main goal of the call: book a demo, schedule a meeting, qualify the lead, or something else?",
+        })
+    if not checklist.get("pricing_available", False) and not pricing_override:
+        question_plan.append({
+            "key": "pricing_override",
+            "priority": "required",
+            "prompt": "I couldn't find pricing on your site. What pricing, offer, or package details is the agent allowed to mention?",
+        })
+    if not call_style:
+        question_plan.append({
+            "key": "call_style",
+            "priority": "optional",
+            "prompt": "How should the agent sound: professional, friendly, consultative, or assertive?",
+        })
+    if not closing_cta:
+        question_plan.append({
+            "key": "closing_cta",
+            "priority": "optional",
+            "prompt": "What closing ask should the agent use, for example scheduling 15 minutes this week?",
+        })
+    if not business_hours:
+        question_plan.append({
+            "key": "business_hours",
+            "priority": "optional",
+            "prompt": "Are there any hours or days when the agent should not call leads?",
+        })
+    if not availability_rules:
+        question_plan.append({
+            "key": "availability_rules",
+            "priority": "optional",
+            "prompt": "Are there any booking or follow-up availability rules the agent should respect?",
+        })
+    if not additional_context:
+        question_plan.append({
+            "key": "additional_context",
+            "priority": "optional",
+            "prompt": "Is there anything else about your strategy, offers, or objections the agent should know?",
+        })
+
+    critical_missing = [
+        m for m in missing
+        if any(k in m for k in ["business_analysis", "caller_name", "objective", "pricing_override"])
+    ]
+    is_ready = len(critical_missing) == 0 and bool(ready_pitches)
 
     return {
         "status": "success",
@@ -2039,6 +2133,19 @@ def assess_voice_readiness() -> dict:
         "checklist": checklist,
         "missing_items": missing,
         "critical_missing": critical_missing,
+        "known_context": {
+            "caller_name": caller_name or "",
+            "objective": objective or "",
+            "call_style": call_style or "",
+            "closing_cta": closing_cta or "",
+            "pricing_override": pricing_override or "",
+            "business_hours": business_hours or "",
+            "availability_rules": availability_rules or "",
+            "additional_context": additional_context or "",
+        },
+        "question_plan": question_plan,
+        "next_question_key": question_plan[0]["key"] if question_plan else "",
+        "next_question_prompt": question_plan[0]["prompt"] if question_plan else "",
         "ready_leads": [
             {
                 "lead_name": p.get("lead_name"),
@@ -2053,7 +2160,7 @@ def assess_voice_readiness() -> dict:
         "recommendation": (
             "All critical info available. Ready to create voice agents!"
             if is_ready
-            else f"Missing {len(critical_missing)} critical items. Please provide: {'; '.join(critical_missing)}"
+            else f"Missing {len(critical_missing)} critical items. Ask next: {question_plan[0]['prompt'] if question_plan else '; '.join(critical_missing)}"
         ),
     }
 
@@ -2084,12 +2191,32 @@ def configure_voice_agent(config_json: str) -> dict:
     """
     try:
         config = json.loads(config_json)
+        alias_map = {
+            "pricing_info": "pricing_override",
+            "pricing": "pricing_override",
+            "call_goal": "objective",
+        }
+        for src_key, dest_key in alias_map.items():
+            if src_key in config and dest_key not in config:
+                config[dest_key] = config[src_key]
+
         voice_config = pipeline_state["preferences"].get("voice_config", {})
         voice_config.update(config)
         pipeline_state["preferences"]["voice_config"] = voice_config
 
         # Also update top-level preferences for backward compat
-        for key in ["caller_name", "call_style", "objective", "pricing_override"]:
+        for key in [
+            "caller_name",
+            "call_style",
+            "objective",
+            "pricing_override",
+            "closing_cta",
+            "business_hours",
+            "availability_rules",
+            "additional_context",
+            "voice_id",
+            "voice_speed",
+        ]:
             if key in config:
                 pipeline_state["preferences"][key] = config[key]
 
@@ -2097,10 +2224,33 @@ def configure_voice_agent(config_json: str) -> dict:
         cid = _campaign_id()
         if cid:
             save_prefs_db(cid, pipeline_state["preferences"])
+            dynamic_vars_payload = {
+                key: value
+                for key, value in config.items()
+                if key in {
+                    "caller_name",
+                    "call_style",
+                    "objective",
+                    "pricing_override",
+                    "closing_cta",
+                    "business_hours",
+                    "availability_rules",
+                    "additional_context",
+                    "language_override",
+                    "voice_id",
+                    "voice_speed",
+                }
+            }
+            if dynamic_vars_payload:
+                save_campaign_dynamic_vars(cid, dynamic_vars_payload)
+
+        readiness = assess_voice_readiness()
 
         return {
             "status": "success",
             "voice_config": voice_config,
+            "saved_keys": sorted(config.keys()),
+            "remaining_missing": readiness.get("missing_items", []),
             "message": "Voice agent configuration saved. Use this when creating ElevenLabs agents.",
         }
     except json.JSONDecodeError as e:
@@ -2179,6 +2329,120 @@ def get_voice_agent_config() -> dict:
         "caller_name": voice_config.get("caller_name") or prefs.get("caller_name", ""),
         "call_style": voice_config.get("call_style") or prefs.get("call_style", "professional"),
         "objective": voice_config.get("objective") or prefs.get("objective", ""),
+    }
+
+
+@traced(type="tool", name="create_campaign_calling_agents")
+def create_campaign_calling_agents(max_agents: int = 0) -> dict:
+    """Create outbound calling agents for all ready leads using saved campaign context."""
+    readiness = assess_voice_readiness()
+    if not readiness.get("ready_to_create_agents"):
+        return {
+            "status": "error",
+            "error": "Campaign is not ready for agent creation yet.",
+            "missing_items": readiness.get("missing_items", []),
+            "next_question_prompt": readiness.get("next_question_prompt", ""),
+        }
+
+    analysis = pipeline_state.get("business_analysis", {}) or {}
+    prefs = pipeline_state.get("preferences", {}) or {}
+    voice_cfg = prefs.get("voice_config", {}) or {}
+    merged_context = _merged_voice_context()
+    config = get_voice_agent_config()
+    ready_leads = config.get("ready_leads", [])
+
+    if max_agents and max_agents > 0:
+        ready_leads = ready_leads[:max_agents]
+
+    if not ready_leads:
+        return {"status": "error", "error": "No ready leads available to create calling agents."}
+
+    caller_name = merged_context.get("caller_name", "").strip()
+    objective = merged_context.get("objective", "").strip()
+    call_style = (merged_context.get("call_style") or "professional").strip()
+    closing_cta = (merged_context.get("closing_cta") or "Can we schedule 15 minutes this week?").strip()
+    pricing_context = (
+        merged_context.get("pricing_override")
+        or merged_context.get("website_pricing")
+        or "Pricing should only be discussed if the lead asks for it."
+    )
+    business_hours = merged_context.get("business_hours", "").strip()
+    availability_rules = merged_context.get("availability_rules", "").strip()
+    additional_context = merged_context.get("additional_context", "").strip()
+    business_name = analysis.get("business_name", "our company")
+    services_summary = ", ".join(analysis.get("services", [])[:6]) or "our services"
+    language = analysis.get("language_code") or voice_cfg.get("language_override") or "en"
+
+    created = []
+    errors = []
+
+    for lead in ready_leads:
+        lead_name = lead.get("lead_name") or "Lead"
+        contact_person = lead.get("contact_person") or lead_name
+        pitch_script = lead.get("pitch_script") or ""
+        first_message = (
+            f"Hi {{{{contact_person}}}}, this is {caller_name} from {{{{your_company}}}}. "
+            f"I'm reaching out because I think we may be able to help {lead_name}."
+        )
+        system_prompt = f"""You are {caller_name}, calling on behalf of {{{{your_company}}}}.
+Your tone must be {call_style}, confident, and concise.
+Your goal is: {objective}.
+
+Business context:
+- Company: {business_name}
+- Services: {services_summary}
+- Pricing guidance: {pricing_context}
+- Closing CTA: {closing_cta}
+{f"- Business hours: {business_hours}" if business_hours else ""}
+{f"- Availability rules: {availability_rules}" if availability_rules else ""}
+{f"- Additional context: {additional_context}" if additional_context else ""}
+
+Lead context:
+- Lead company: {{{{lead_company}}}}
+- Contact person: {{{{contact_person}}}}
+- Industry: {{{{lead_industry}}}}
+
+Personalized pitch:
+{{{{pitch_script}}}}
+
+Rules:
+- Use the lead's business context and keep the conversation natural.
+- Ask one question at a time.
+- Do not invent pricing or guarantees.
+- If the lead is interested, use this CTA: {closing_cta}
+- If the lead is not the right person, ask who the correct person is.
+"""
+        result = create_elevenlabs_agent(
+            agent_name=f"SDR for {lead_name}",
+            first_message=first_message,
+            system_prompt=system_prompt,
+            lead_name=lead_name,
+            lead_company=lead_name,
+            lead_industry="",
+            contact_person=contact_person,
+            your_company=business_name,
+            your_services=services_summary,
+            pitch_script=pitch_script,
+            call_objective=objective,
+            language=language,
+        )
+        if result.get("status") == "success":
+            created.append({
+                "lead_name": lead_name,
+                "agent_id": result.get("agent_id", ""),
+            })
+        else:
+            errors.append({
+                "lead_name": lead_name,
+                "error": result.get("error", "Unknown error"),
+            })
+
+    return {
+        "status": "success" if created else "error",
+        "created_count": len(created),
+        "error_count": len(errors),
+        "created_agents": created,
+        "errors": errors,
     }
 
 

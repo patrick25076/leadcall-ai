@@ -1017,6 +1017,7 @@ from agents.tools import (
     assess_voice_readiness,
     configure_voice_agent,
     get_voice_agent_config,
+    create_campaign_calling_agents as _create_campaign_calling_agents_tool,
     get_pipeline_state as _get_pipeline_state_tool,
     save_preferences as _save_preferences_tool,
     get_preferences as _get_preferences_tool,
@@ -1056,6 +1057,14 @@ _VOICE_TOOLS = {
 
 # System instruction for the live voice agent (from agent.py)
 _VOICE_SYSTEM_INSTRUCTION = voice_config_live_agent.instruction
+
+
+def _voice_get_campaign_dynamic_vars(campaign_id: int = 0) -> dict:
+    """Return campaign dynamic vars, defaulting to the active campaign."""
+    cid = campaign_id or int(pipeline_state.get("campaign_id") or 0)
+    if not cid:
+        return {}
+    return _get_campaign_dvars(cid)
 
 
 def _voice_configure_voice_agent(
@@ -1101,6 +1110,8 @@ def _voice_configure_voice_agent(
 
 
 _VOICE_TOOLS["configure_voice_agent"] = _voice_configure_voice_agent
+_VOICE_TOOLS["get_campaign_dynamic_vars"] = _voice_get_campaign_dynamic_vars
+_VOICE_TOOLS["create_campaign_calling_agents"] = _create_campaign_calling_agents_tool
 
 
 def _build_voice_tool_declarations() -> list[dict]:
