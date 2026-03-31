@@ -23,25 +23,30 @@ export const kbRefresh = task({
     metadata.set("campaignId", campaignId);
     metadata.set("step", "fetching_docs");
 
-    // Step 1: Get existing docs in this KB
+    // Step 1: Get existing doc IDs from our backend
+    const stateResp = await fetch(`${API_URL}/api/campaigns/${campaignId}/state`, {
+      headers: { "Content-Type": "application/json" },
+    });
+    const state = stateResp.ok ? (await stateResp.json()) as Record<string, unknown> : {};
+
+    // Step 2: Delete old docs from ElevenLabs (new flat API)
+    metadata.set("step", "deleting_old_docs");
     const docsResp = await fetch(
-      `https://api.elevenlabs.io/v1/convai/knowledge-bases/${kbId}/documents`,
+      `https://api.elevenlabs.io/v1/convai/knowledge-base`,
       { headers: { "xi-api-key": EL_API_KEY } }
     );
 
     if (docsResp.ok) {
-      const docsData = (await docsResp.json()) as { documents?: Array<{ id: string }> };
-      const existingDocs = docsData.documents || [];
+      const docsData = (await docsResp.json()) as { documents?: Array<{ id: string; name: string }> };
+      const allDocs = docsData.documents || [];
 
-      // Step 2: Delete old docs
-      metadata.set("step", "deleting_old_docs");
-      for (const doc of existingDocs) {
+      for (const doc of allDocs) {
         try {
           await fetch(
-            `https://api.elevenlabs.io/v1/convai/knowledge-bases/${kbId}/documents/${doc.id}`,
+            `https://api.elevenlabs.io/v1/convai/knowledge-base/${doc.id}?force=true`,
             { method: "DELETE", headers: { "xi-api-key": EL_API_KEY } }
           );
-          logger.info("Deleted old doc", { docId: doc.id });
+          logger.info("Deleted old doc", { docId: doc.id, name: doc.name });
         } catch (e) {
           logger.warn("Failed to delete doc", { docId: doc.id, error: String(e) });
         }

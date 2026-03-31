@@ -202,68 +202,41 @@ class TestDynamicVars:
 class TestKnowledgeBase:
     """Test KB creation, upload, and attachment."""
 
-    def test_create_kb_no_api_key(self):
+    def test_create_kb_returns_synthetic_id(self):
+        """create_knowledge_base is now a no-op that returns a synthetic ID."""
         result = create_knowledge_base(1, "Test KB")
-        assert result["status"] == "error"
-        assert "ELEVENLABS_API_KEY" in result["error"]
-
-    @patch("agents.tools.httpx.post")
-    @patch("agents.tools.db.update_campaign_kb_id")
-    @patch("agents.tools.db.get_campaign_kb_id", return_value="")
-    def test_create_kb_success(self, mock_get_kb, mock_update, mock_post, populated_pipeline):
-        os.environ["ELEVENLABS_API_KEY"] = "test-key"
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"id": "kb_test123"}
-        mock_resp.raise_for_status = MagicMock()
-        mock_post.return_value = mock_resp
-
-        result = create_knowledge_base(1, "Ice Trust KB")
-
         assert result["status"] == "success"
-        assert result["kb_id"] == "kb_test123"
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
-        assert "knowledge-bases" in call_args[0][0]
-        os.environ["ELEVENLABS_API_KEY"] = ""
-
-    @patch("agents.tools.db.get_campaign_kb_id", return_value="kb_existing")
-    def test_create_kb_already_exists(self, mock_get_kb, populated_pipeline):
-        os.environ["ELEVENLABS_API_KEY"] = "test-key"
-        result = create_knowledge_base(1, "Test KB")
-        assert result["status"] == "exists"
-        assert result["kb_id"] == "kb_existing"
-        os.environ["ELEVENLABS_API_KEY"] = ""
+        assert "campaign_1_kb" in result["kb_id"]
 
     def test_upload_kb_document_empty_content(self):
         os.environ["ELEVENLABS_API_KEY"] = "test-key"
-        result = upload_kb_document("kb_123", "services", "")
+        result = upload_kb_document("services", "")
         assert result["status"] == "skipped"
         os.environ["ELEVENLABS_API_KEY"] = ""
 
     @patch("agents.tools.httpx.post")
     @patch("agents.tools.db.save_kb_document", return_value=1)
-    @patch("agents.tools.db.get_kb_total_chars", return_value=0)
-    def test_upload_kb_document_success(self, mock_chars, mock_save, mock_post):
+    def test_upload_kb_document_success(self, mock_save, mock_post):
         os.environ["ELEVENLABS_API_KEY"] = "test-key"
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"id": "doc_abc123"}
         mock_resp.raise_for_status = MagicMock()
         mock_post.return_value = mock_resp
 
-        result = upload_kb_document("kb_123", "services", "Ice delivery service content", "services.txt", 1)
+        result = upload_kb_document("services", "Ice delivery service content", "Ice Trust - Services", 1)
 
         assert result["status"] == "success"
         assert result["doc_id"] == "doc_abc123"
-        assert result["chars_remaining"] < 300_000
+        # Verify correct new API endpoint
+        call_url = mock_post.call_args[0][0]
+        assert "/v1/convai/knowledge-base/text" in call_url
         os.environ["ELEVENLABS_API_KEY"] = ""
 
-    @patch("agents.tools.db.get_kb_total_chars", return_value=299_999)
-    def test_upload_kb_document_limit_exceeded(self, mock_chars):
-        os.environ["ELEVENLABS_API_KEY"] = "test-key"
-        result = upload_kb_document("kb_123", "full_crawl", "x" * 10000)
-        # Should truncate to fit, only 1 char available
-        assert result["status"] != "success" or result.get("chars_remaining", 0) == 0
+    def test_upload_kb_no_api_key(self):
         os.environ["ELEVENLABS_API_KEY"] = ""
+        result = upload_kb_document("services", "content")
+        assert result["status"] == "error"
+        assert "ELEVENLABS_API_KEY" in result["error"]
 
     def test_read_kb_documents_empty(self):
         result = read_kb_documents(1)
@@ -273,13 +246,37 @@ class TestKnowledgeBase:
     @patch("agents.tools.db.get_kb_documents")
     def test_read_kb_documents_returns_content(self, mock_docs):
         mock_docs.return_value = [
-            {"doc_type": "services", "filename": "services.txt", "content_text": "Ice delivery", "char_count": 12, "el_kb_id": "kb_123"},
-            {"doc_type": "pricing", "filename": "pricing.txt", "content_text": "50 RON/delivery", "char_count": 15, "el_kb_id": "kb_123"},
+            {"doc_type": "services", "filename": "services.txt", "content_text": "Ice delivery", "char_count": 12, "el_doc_id": "doc_1"},
+            {"doc_type": "pricing", "filename": "pricing.txt", "content_text": "50 RON/delivery", "char_count": 15, "el_doc_id": "doc_2"},
         ]
         result = read_kb_documents(1)
         assert result["total_docs"] == 2
         assert result["documents"][0]["content"] == "Ice delivery"
-        assert result["kb_id"] == "kb_123"
+        assert result["documents"][0]["doc_id"] == "doc_1"
+
+    @patch("agents.tools.httpx.patch")
+    @patch("agents.tools.db.get_kb_documents")
+    def test_attach_kb_to_agent_uses_doc_ids(self, mock_docs, mock_patch):
+        os.environ["ELEVENLABS_API_KEY"] = "test-key"
+        mock_docs.return_value = [
+            {"el_doc_id": "doc_1", "doc_type": "services", "filename": "services.txt"},
+            {"el_doc_id": "doc_2", "doc_type": "pricing", "filename": "pricing.txt"},
+        ]
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_patch.return_value = mock_resp
+
+        result = attach_kb_to_agent("agent_123", 1)
+
+        assert result["status"] == "success"
+        assert result["docs_attached"] == 2
+        # Verify the payload uses new format with type/name/id
+        call_json = mock_patch.call_args[1]["json"]
+        kb_entries = call_json["conversation_config"]["agent"]["prompt"]["knowledge_base"]
+        assert kb_entries[0]["type"] == "text"
+        assert kb_entries[0]["id"] == "doc_1"
+        assert "usage_mode" in kb_entries[0]
+        os.environ["ELEVENLABS_API_KEY"] = ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -311,11 +308,10 @@ class TestAutoBuildKB:
         assert result["status"] == "success"
         assert "kb_id" not in result  # No KB without API key
 
-    @patch("agents.tools.create_knowledge_base")
     @patch("agents.tools.upload_kb_document")
-    def test_build_campaign_kb_creates_docs(self, mock_upload, mock_create, populated_pipeline):
+    @patch("agents.tools.db.get_kb_documents", return_value=[])
+    def test_build_campaign_kb_creates_docs(self, mock_existing, mock_upload, populated_pipeline):
         os.environ["ELEVENLABS_API_KEY"] = "test-key"
-        mock_create.return_value = {"status": "success", "kb_id": "kb_built"}
         mock_upload.return_value = {"status": "success", "doc_id": "doc_1"}
 
         result = build_campaign_kb(1)
@@ -323,6 +319,7 @@ class TestAutoBuildKB:
         assert result["status"] == "success"
         assert "services" in result["docs_uploaded"]
         assert "about" in result["docs_uploaded"]
+        assert len(result["doc_ids"]) >= 3
         # Should upload services, pricing, about, and full_crawl
         assert mock_upload.call_count >= 3
         os.environ["ELEVENLABS_API_KEY"] = ""
@@ -526,15 +523,15 @@ class TestAgentCreationWithKB:
 
     @patch("agents.tools.attach_kb_to_agent")
     @patch("agents.tools.httpx.post")
-    @patch("agents.tools.db.get_campaign_kb_id", return_value="kb_auto_attached")
+    @patch("agents.tools.db.get_kb_documents", return_value=[{"el_doc_id": "doc_1"}])
     @patch("agents.tools.save_agent_db", return_value=1)
-    def test_create_agent_auto_attaches_kb(self, mock_save, mock_get_kb, mock_post, mock_attach, populated_pipeline):
+    def test_create_agent_auto_attaches_kb(self, mock_save, mock_get_docs, mock_post, mock_attach, populated_pipeline):
         os.environ["ELEVENLABS_API_KEY"] = "test-key"
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"agent_id": "agent_new_123"}
         mock_resp.raise_for_status = MagicMock()
         mock_post.return_value = mock_resp
-        mock_attach.return_value = {"status": "success"}
+        mock_attach.return_value = {"status": "success", "docs_attached": 1}
 
         result = create_elevenlabs_agent(
             agent_name="SDR for Caru",
@@ -546,8 +543,8 @@ class TestAgentCreationWithKB:
 
         assert result["status"] == "success"
         assert result["agent_id"] == "agent_new_123"
-        # Verify KB was auto-attached
-        mock_attach.assert_called_once_with("agent_new_123", "kb_auto_attached")
+        # Verify KB docs were auto-attached using campaign_id
+        mock_attach.assert_called_once_with("agent_new_123", 1)
         os.environ["ELEVENLABS_API_KEY"] = ""
 
 

@@ -923,55 +923,33 @@ def list_voices(language: str = "") -> dict:
         return {"status": "error", "error": "Failed to list voices"}
 
 
-# ─── Knowledge Base Tools ─────────────────────────────────────────────────
+# ─── Knowledge Base Tools (ElevenLabs new flat document API) ──────────────
+# ElevenLabs removed the old KB container model. Documents are now uploaded
+# directly via /v1/convai/knowledge-base/text|file|url and attached to agents
+# by their individual doc IDs.
 
 @traced(type="tool", name="create_knowledge_base")
 def create_knowledge_base(campaign_id: int = 0, name: str = "") -> dict:
-    """Create an ElevenLabs knowledge base for a campaign. Returns the KB ID."""
-    import hashlib
+    """No-op kept for backward compatibility. KB containers no longer exist in ElevenLabs.
+    Documents are uploaded directly and tracked per campaign in our DB."""
     cid = campaign_id or _campaign_id()
-    if not name:
-        bname = (pipeline_state.get("business_analysis") or {}).get("business_name", "Campaign")
-        name = f"{bname} - Knowledge Base"
-
-    api_key = os.getenv("ELEVENLABS_API_KEY", "")
-    if not api_key:
-        return {"status": "error", "error": "ELEVENLABS_API_KEY not configured"}
-
-    # Check if campaign already has a KB
-    existing_kb = db.get_campaign_kb_id(cid)
-    if existing_kb:
-        return {"status": "exists", "kb_id": existing_kb, "message": "KB already exists for this campaign"}
-
-    try:
-        resp = httpx.post(
-            "https://api.elevenlabs.io/v1/convai/knowledge-bases",
-            headers={"xi-api-key": api_key, "Content-Type": "application/json"},
-            json={"name": name},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        kb_id = resp.json().get("id", "")
-        if kb_id:
-            db.update_campaign_kb_id(cid, kb_id)
-            pipeline_state["el_kb_id"] = kb_id
-            logger.info("Created KB %s for campaign %d", kb_id, cid)
-        return {"status": "success", "kb_id": kb_id}
-    except Exception as e:
-        logger.error("Create KB error: %s", e)
-        return {"status": "error", "error": str(e)}
+    # Return a synthetic ID — we track docs in our DB, not a remote KB container
+    synthetic_id = f"campaign_{cid}_kb"
+    pipeline_state["el_kb_id"] = synthetic_id
+    return {"status": "success", "kb_id": synthetic_id, "message": "Documents tracked per campaign"}
 
 
 @traced(type="tool", name="upload_kb_document")
-def upload_kb_document(kb_id: str, doc_type: str, content: str,
-                       filename: str = "", campaign_id: int = 0) -> dict:
-    """Upload a text document to an ElevenLabs knowledge base.
+def upload_kb_document(doc_type: str, content: str, name: str = "",
+                       campaign_id: int = 0) -> dict:
+    """Upload a text document to ElevenLabs knowledge base.
+
+    Uses the new flat document API: POST /v1/convai/knowledge-base/text
 
     Args:
-        kb_id: The ElevenLabs knowledge base ID
         doc_type: Type of document (services, faq, pricing, about, full_crawl)
         content: Plain text content to upload
-        filename: Optional filename (auto-generated if empty)
+        name: Display name for the document (auto-generated if empty)
         campaign_id: Campaign ID (auto-detected if 0)
     """
     import hashlib
@@ -983,56 +961,65 @@ def upload_kb_document(kb_id: str, doc_type: str, content: str,
     if not content or not content.strip():
         return {"status": "skipped", "reason": "Empty content"}
 
-    # Enforce 300k char limit
-    total_chars = db.get_kb_total_chars(kb_id)
-    if total_chars + len(content) > 300_000:
-        # Truncate to fit
-        available = 300_000 - total_chars
-        if available <= 0:
-            return {"status": "error", "error": "KB char limit reached (300k)"}
-        content = content[:available]
+    if not name:
+        bname = (pipeline_state.get("business_analysis") or {}).get("business_name", "Business")
+        name = f"{bname} - {doc_type}"
 
-    if not filename:
-        filename = f"{doc_type}.txt"
     content_hash = hashlib.sha256(content.encode()).hexdigest()
 
     try:
-        # Upload as file via multipart form
-        files = {"file": (filename, content.encode("utf-8"), "text/plain")}
         resp = httpx.post(
-            f"https://api.elevenlabs.io/v1/convai/knowledge-bases/{kb_id}/documents",
-            headers={"xi-api-key": api_key},
-            files=files,
+            "https://api.elevenlabs.io/v1/convai/knowledge-base/text",
+            headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+            json={"text": content, "name": name},
             timeout=60,
         )
         resp.raise_for_status()
-        doc_id = resp.json().get("id", "")
+        data = resp.json()
+        doc_id = data.get("id", "")
 
         # Save to DB
         db.save_kb_document(
-            campaign_id=cid, el_kb_id=kb_id, el_doc_id=doc_id,
-            doc_type=doc_type, content_text=content, filename=filename,
+            campaign_id=cid, el_kb_id=f"campaign_{cid}_kb", el_doc_id=doc_id,
+            doc_type=doc_type, content_text=content, filename=f"{doc_type}.txt",
             content_hash=content_hash, char_count=len(content),
         )
-        logger.info("Uploaded KB doc %s (%s, %d chars) to KB %s", doc_id, doc_type, len(content), kb_id)
-        return {
-            "status": "success",
-            "doc_id": doc_id,
-            "doc_type": doc_type,
-            "chars_used": total_chars + len(content),
-            "chars_remaining": 300_000 - total_chars - len(content),
-        }
+        logger.info("Uploaded KB doc %s (%s, %d chars)", doc_id, doc_type, len(content))
+        return {"status": "success", "doc_id": doc_id, "doc_type": doc_type, "name": name}
     except Exception as e:
         logger.error("Upload KB doc error: %s", e)
         return {"status": "error", "error": str(e)}
 
 
 @traced(type="tool", name="attach_kb_to_agent")
-def attach_kb_to_agent(agent_id: str, kb_id: str) -> dict:
-    """Attach a knowledge base to an ElevenLabs agent with RAG config."""
+def attach_kb_to_agent(agent_id: str, campaign_id: int = 0) -> dict:
+    """Attach all KB documents for a campaign to an ElevenLabs agent.
+
+    Reads doc IDs from our DB and patches the agent's knowledge_base config.
+    """
+    cid = campaign_id or _campaign_id()
     api_key = os.getenv("ELEVENLABS_API_KEY", "")
     if not api_key:
         return {"status": "error", "error": "ELEVENLABS_API_KEY not configured"}
+
+    docs = db.get_kb_documents(cid)
+    if not docs:
+        return {"status": "skipped", "message": "No KB documents found for this campaign"}
+
+    # Build knowledge_base array with correct format for new API
+    kb_entries = []
+    for d in docs:
+        doc_id = d.get("el_doc_id", "")
+        if doc_id:
+            kb_entries.append({
+                "type": "text",
+                "name": d.get("filename", d.get("doc_type", "document")),
+                "id": doc_id,
+                "usage_mode": "auto",
+            })
+
+    if not kb_entries:
+        return {"status": "skipped", "message": "No valid document IDs to attach"}
 
     try:
         resp = httpx.patch(
@@ -1042,7 +1029,7 @@ def attach_kb_to_agent(agent_id: str, kb_id: str) -> dict:
                 "conversation_config": {
                     "agent": {
                         "prompt": {
-                            "knowledge_base": [{"type": "custom", "id": kb_id}]
+                            "knowledge_base": kb_entries
                         }
                     }
                 }
@@ -1050,8 +1037,8 @@ def attach_kb_to_agent(agent_id: str, kb_id: str) -> dict:
             timeout=30,
         )
         resp.raise_for_status()
-        logger.info("Attached KB %s to agent %s", kb_id, agent_id)
-        return {"status": "success", "agent_id": agent_id, "kb_id": kb_id}
+        logger.info("Attached %d KB docs to agent %s", len(kb_entries), agent_id)
+        return {"status": "success", "agent_id": agent_id, "docs_attached": len(kb_entries)}
     except Exception as e:
         logger.error("Attach KB error: %s", e)
         return {"status": "error", "error": str(e)}
@@ -1067,23 +1054,23 @@ def read_kb_documents(campaign_id: int = 0) -> dict:
         "documents": [
             {
                 "doc_type": d.get("doc_type", ""),
-                "filename": d.get("filename", ""),
+                "doc_id": d.get("el_doc_id", ""),
+                "name": d.get("filename", ""),
                 "content": (d.get("content_text") or "")[:5000],
                 "char_count": d.get("char_count", 0),
             }
             for d in docs
         ],
         "total_docs": len(docs),
-        "kb_id": docs[0].get("el_kb_id", "") if docs else "",
     }
 
 
 @traced(type="tool", name="build_campaign_kb")
 def build_campaign_kb(campaign_id: int = 0) -> dict:
-    """Auto-create a KB from the crawled website data and business analysis.
+    """Auto-create KB documents from the crawled website data and business analysis.
 
-    Transforms the website crawl and analysis into structured documents
-    and uploads them to ElevenLabs KB. Call this after website analysis completes.
+    Transforms the website crawl and analysis into structured text documents,
+    uploads each to ElevenLabs via the flat document API, and stores doc IDs in DB.
     """
     cid = campaign_id or _campaign_id()
     analysis = pipeline_state.get("business_analysis") or {}
@@ -1092,17 +1079,19 @@ def build_campaign_kb(campaign_id: int = 0) -> dict:
     if not analysis:
         return {"status": "error", "error": "No business analysis found. Run website analysis first."}
 
-    # Create KB
-    kb_result = create_knowledge_base(cid)
-    if kb_result.get("status") == "error":
-        return kb_result
-    kb_id = kb_result.get("kb_id", "")
-    if not kb_id:
-        return {"status": "error", "error": "Failed to get KB ID"}
+    # Check if docs already exist for this campaign
+    existing = db.get_kb_documents(cid)
+    if existing:
+        return {
+            "status": "exists",
+            "message": f"Campaign already has {len(existing)} KB documents",
+            "total_docs": len(existing),
+            "doc_ids": [d.get("el_doc_id", "") for d in existing],
+        }
 
     uploaded = []
+    doc_ids = []
 
-    # Build structured documents from analysis
     bname = analysis.get("business_name", "Business")
     services = analysis.get("services", [])
     pricing = analysis.get("pricing_info", "")
@@ -1119,35 +1108,37 @@ def build_campaign_kb(campaign_id: int = 0) -> dict:
                 services_text += f"- {s}\n" if isinstance(s, str) else f"- {json.dumps(s)}\n"
         else:
             services_text += str(services)
-        result = upload_kb_document(kb_id, "services", services_text, "services.txt", cid)
+        result = upload_kb_document("services", services_text, f"{bname} - Services", cid)
         if result.get("status") == "success":
             uploaded.append("services")
+            doc_ids.append(result["doc_id"])
 
     # 2. Pricing document
     if pricing:
         pricing_text = f"# {bname} - Pricing\n\n{pricing}"
-        result = upload_kb_document(kb_id, "pricing", pricing_text, "pricing.txt", cid)
+        result = upload_kb_document("pricing", pricing_text, f"{bname} - Pricing", cid)
         if result.get("status") == "success":
             uploaded.append("pricing")
+            doc_ids.append(result["doc_id"])
 
     # 3. About / business profile
     about_text = f"# {bname} - Business Profile\n\n"
     about_text += f"Industry: {industry}\n"
     about_text += f"Location: {location}\n"
     if differentiators:
-        about_text += f"\nKey Differentiators:\n"
+        about_text += "\nKey Differentiators:\n"
         for d in differentiators:
             about_text += f"- {d}\n"
     if icp:
         about_text += f"\nIdeal Customer Profile:\n{json.dumps(icp, indent=2)}\n"
-    result = upload_kb_document(kb_id, "about", about_text, "about.txt", cid)
+    result = upload_kb_document("about", about_text, f"{bname} - Business Profile", cid)
     if result.get("status") == "success":
         uploaded.append("about")
+        doc_ids.append(result["doc_id"])
 
-    # 4. Full crawl content (truncated to fit)
+    # 4. Full crawl content
     total_content = crawl_data.get("total_content", "") or ""
     if not total_content:
-        # Fallback: use page contents from crawl_data
         pages = crawl_data.get("pages", [])
         if pages:
             total_content = "\n\n---\n\n".join(
@@ -1155,15 +1146,16 @@ def build_campaign_kb(campaign_id: int = 0) -> dict:
             )
     if total_content:
         crawl_text = f"# {bname} - Website Content\n\n{total_content}"
-        result = upload_kb_document(kb_id, "full_crawl", crawl_text[:250_000], "website_content.txt", cid)
+        result = upload_kb_document("full_crawl", crawl_text[:250_000], f"{bname} - Website Content", cid)
         if result.get("status") == "success":
             uploaded.append("full_crawl")
+            doc_ids.append(result["doc_id"])
 
-    logger.info("Built KB %s for campaign %d: %d docs uploaded", kb_id, cid, len(uploaded))
+    logger.info("Built KB for campaign %d: %d docs uploaded", cid, len(uploaded))
     return {
         "status": "success",
-        "kb_id": kb_id,
         "docs_uploaded": uploaded,
+        "doc_ids": doc_ids,
         "total_docs": len(uploaded),
     }
 
@@ -1407,11 +1399,12 @@ RULES:
         if cid:
             save_agent_db(cid, agent_info)
 
-        # Auto-attach KB if one exists for this campaign
-        kb_id = pipeline_state.get("el_kb_id") or db.get_campaign_kb_id(cid) if cid else ""
-        if kb_id and agent_id:
-            kb_result = attach_kb_to_agent(agent_id, kb_id)
-            logger.info("Auto-attached KB %s to agent %s: %s", kb_id, agent_id, kb_result.get("status"))
+        # Auto-attach KB documents if any exist for this campaign
+        if cid and agent_id:
+            kb_docs = db.get_kb_documents(cid)
+            if kb_docs:
+                kb_result = attach_kb_to_agent(agent_id, cid)
+                logger.info("Auto-attached %d KB docs to agent %s: %s", len(kb_docs), agent_id, kb_result.get("status"))
 
         return {"status": "success", "agent_id": agent_id, "dynamic_variables": dynamic_variables}
     except Exception as e:
