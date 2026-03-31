@@ -2,25 +2,13 @@
 
 export const dynamic = "force-dynamic";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useEffect } from "react";
 import OnboardingWizard, { type OnboardingConfig } from "@/components/OnboardingWizard";
 import Dashboard from "@/components/Dashboard";
 import CampaignList from "@/components/CampaignList";
 import { supabase } from "@/lib/supabase";
 
-function saveToStorage(key: string, value: unknown) {
-  try {
-    localStorage.setItem(`leadcall_${key}`, JSON.stringify(value));
-  } catch {}
-}
-
-function loadFromStorage<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(`leadcall_${key}`);
-    if (raw) return JSON.parse(raw) as T;
-  } catch {}
-  return fallback;
-}
+const API = process.env.NEXT_PUBLIC_API_URL || "";
 
 type View = "loading" | "onboarding" | "campaigns" | "dashboard";
 
@@ -29,12 +17,27 @@ export default function Home() {
   const [activeCampaignId, setActiveCampaignId] = useState<number | null>(null);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (session?.user) {
-        const onboarded = loadFromStorage<boolean>("onboarded", false);
-        if (onboarded) {
-          setView("campaigns");
-        } else {
+        // Check backend for existing campaigns to determine new vs returning user
+        try {
+          const resp = await fetch(`${API}/api/campaigns`, {
+            headers: {
+              Authorization: `Bearer ${session.access_token}`,
+            },
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            const campaigns = data.campaigns || data || [];
+            if (Array.isArray(campaigns) && campaigns.length > 0) {
+              setView("campaigns");
+            } else {
+              setView("onboarding");
+            }
+          } else {
+            setView("onboarding");
+          }
+        } catch {
           setView("onboarding");
         }
       } else {
@@ -46,9 +49,10 @@ export default function Home() {
   const [autoAnalyzeUrl, setAutoAnalyzeUrl] = useState<string | null>(null);
 
   const handleOnboardingComplete = (config: OnboardingConfig) => {
-    saveToStorage("url", config.websiteUrl);
-    saveToStorage("onboarded", true);
-    saveToStorage("onboarding_config", config);
+    try {
+      localStorage.setItem("leadcall_url", JSON.stringify(config.websiteUrl));
+      localStorage.setItem("leadcall_onboarding_config", JSON.stringify(config));
+    } catch { /* ignore storage errors */ }
     setAutoAnalyzeUrl(config.websiteUrl); // Tell Dashboard to auto-start
     setView("dashboard");
     setActiveCampaignId(null);
