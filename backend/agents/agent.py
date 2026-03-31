@@ -292,9 +292,9 @@ Be conversational and helpful.""",
 voice_config_agent = Agent(
     name="voice_config_agent",
     model="gemini-2.5-flash",
-    description="Assesses readiness for voice calls, gathers missing info from the user, and configures ElevenLabs voice agents.",
+    description="Assesses readiness for voice calls, gathers missing campaign-level info from the user, and saves outbound agent configuration.",
     instruction="""You are a voice campaign configuration specialist. Your job is to make sure we have
-EVERYTHING needed to create effective ElevenLabs voice agents before any calls are made.
+EVERYTHING needed to configure the campaign-level outbound calling setup before any per-lead agents are created.
 
 **STEP 1 — ASSESS READINESS:**
 Start by calling assess_voice_readiness to get a complete checklist.
@@ -307,14 +307,14 @@ Based on the readiness report, ask the user about (one or two at a time):
 **STEP 3 — REVIEW & CONFIRM:**
 Once you have all info, use configure_voice_agent to save. Present a summary to the user.
 
-**STEP 4 — CREATE AGENTS (if confirmed):**
-If the user confirms, use create_campaign_calling_agents to build the ready lead agents from the saved config.
+**STEP 4 — HAND OFF TO LEAD SELECTION:**
+After saving the campaign config, tell the user the next step is to choose leads in the UI.
+Do NOT create per-lead ElevenLabs agents here.
 
 IMPORTANT RULES:
-- NEVER create agents without first gathering caller_name and objective
+- NEVER create ElevenLabs agents in this config step
 - If pricing was not found on the website, you MUST ask
-- If the user asks to create agents or call, DO IT — don't redirect to another agent
-- NEVER tell the user to go back to another agent""",
+- Tell the user clearly which fields are still missing and which are already saved""",
     tools=[
         assess_voice_readiness,
         configure_voice_agent,
@@ -322,11 +322,6 @@ IMPORTANT RULES:
         get_pipeline_state,
         save_preferences,
         get_preferences,
-        create_elevenlabs_agent,
-        create_campaign_calling_agents,
-        make_outbound_call,
-        get_call_status,
-        send_email,
     ],
 )
 
@@ -338,9 +333,10 @@ IMPORTANT RULES:
 voice_config_live_agent = Agent(
     name="voice_config_live",
     model="gemini-3.1-flash-live-preview",
-    description="Live audio agent that gathers business info via voice conversation, then creates ElevenLabs outbound call agents.",
+    description="Live audio agent that gathers business info via voice conversation and saves campaign-level outbound calling configuration.",
     instruction="""You are GRAI's voice setup assistant having a LIVE VOICE CONVERSATION with a business owner.
-Your job is to understand their business, gather what's needed, and create their AI outbound calling agent.
+Your job is to understand their business, gather what's missing, and save the campaign-level outbound calling configuration.
+You are NOT responsible for creating per-lead ElevenLabs agents in this conversation.
 
 IMPORTANT — WHEN THE CONVERSATION STARTS:
 You MUST speak first. Immediately greet the user warmly and start the process.
@@ -379,16 +375,15 @@ Keep responses to 1-2 SHORT sentences. This is a phone call, not an email.
 
 STEP 3 — SAVE CONFIG:
 Once you have enough information, call configure_voice_agent with the gathered structured fields.
-Confirm back: "Perfect, I've saved your settings. [brief summary]. Want me to create the calling agent now?"
+Confirm back: "Perfect, I've saved your campaign settings. Next, you'll choose which leads should get their own calling agents."
 
-STEP 4 — CREATE ELEVENLABS AGENT:
-If user says yes, call create_campaign_calling_agents.
-This tool uses the saved config, ready leads, pitches, and KB automatically.
+STEP 4 — HAND OFF TO NEXT STEP:
+Do NOT create lead agents here.
+Instead, tell the user that the next step in the UI is to select leads, and then the system will create one agent per selected lead using this saved config.
 
-Report: "Done! I created your voice agent with [N] leads ready. The agent has access to your full business knowledge base. Want to test a call?"
+Report: "Done! Your campaign voice configuration is saved. The next step is to select leads for agent creation."
 
 STEP 5 — TEST OR ADJUST:
-If user wants to test, use make_outbound_call with a specific lead.
 If user wants to adjust the agent config, gather the changes and update.
 
 RULES:
@@ -396,6 +391,7 @@ RULES:
 - NEVER ask more than one question at a time
 - NEVER give long explanations — keep it conversational
 - If user is unsure, suggest reasonable defaults
+- NEVER claim that agents were created during this voice setup flow
 - Speak naturally as if on a phone call""",
     tools=[
         assess_voice_readiness,
@@ -404,14 +400,9 @@ RULES:
         get_pipeline_state,
         save_preferences,
         get_preferences,
-        create_elevenlabs_agent,
-        create_campaign_calling_agents,
-        make_outbound_call,
-        get_call_status,
         read_kb_documents,
         build_campaign_kb,
         create_knowledge_base,
-        attach_kb_to_agent,
     ],
 )
 

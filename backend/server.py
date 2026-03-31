@@ -1017,20 +1017,13 @@ from agents.tools import (
     assess_voice_readiness,
     configure_voice_agent,
     get_voice_agent_config,
-    create_campaign_calling_agents as _create_campaign_calling_agents_tool,
     get_pipeline_state as _get_pipeline_state_tool,
     save_preferences as _save_preferences_tool,
     get_preferences as _get_preferences_tool,
-    create_elevenlabs_agent as _create_elevenlabs_agent_tool,
-    make_outbound_call as _make_outbound_call_tool,
-    get_call_status as _get_call_status_tool,
     read_kb_documents as _read_kb_documents_tool,
     build_campaign_kb as _build_campaign_kb_tool,
     create_knowledge_base as _create_kb_tool,
     upload_kb_document as _upload_kb_doc_tool,
-    attach_kb_to_agent as _attach_kb_tool,
-    submit_batch_calls as _submit_batch_calls_tool,
-    get_batch_call_status as _get_batch_status_tool,
 )
 from db import get_campaign_dynamic_vars as _get_campaign_dvars
 
@@ -1042,17 +1035,11 @@ _VOICE_TOOLS = {
     "get_pipeline_state": _get_pipeline_state_tool,
     "save_preferences": _save_preferences_tool,
     "get_preferences": _get_preferences_tool,
-    "create_elevenlabs_agent": _create_elevenlabs_agent_tool,
-    "make_outbound_call": _make_outbound_call_tool,
-    "get_call_status": _get_call_status_tool,
     "read_kb_documents": _read_kb_documents_tool,
     "build_campaign_kb": _build_campaign_kb_tool,
     "create_knowledge_base": _create_kb_tool,
     "upload_kb_document": _upload_kb_doc_tool,
-    "attach_kb_to_agent": _attach_kb_tool,
     "get_campaign_dynamic_vars": _get_campaign_dvars,
-    "submit_batch_calls": _submit_batch_calls_tool,
-    "get_batch_call_status": _get_batch_status_tool,
 }
 
 # System instruction for the live voice agent (from agent.py)
@@ -1111,7 +1098,6 @@ def _voice_configure_voice_agent(
 
 _VOICE_TOOLS["configure_voice_agent"] = _voice_configure_voice_agent
 _VOICE_TOOLS["get_campaign_dynamic_vars"] = _voice_get_campaign_dynamic_vars
-_VOICE_TOOLS["create_campaign_calling_agents"] = _create_campaign_calling_agents_tool
 
 
 def _build_voice_tool_declarations() -> list[dict]:

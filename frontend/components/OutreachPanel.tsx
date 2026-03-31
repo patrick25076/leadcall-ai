@@ -113,8 +113,8 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
           setVoiceStatus("Saving your preferences...");
         }
       } else if (msg.type === "tool_result") {
-        if (msg.tool_name === "create_elevenlabs_agent") {
-          setVoiceStatus("Voice agent created!");
+        if (msg.tool_name === "configure_voice_agent") {
+          setVoiceStatus("Campaign voice config saved — next select the leads for agent creation.");
         }
       } else if (msg.type === "turn_complete") {
         resetPlayback();
