@@ -15,11 +15,12 @@ interface OutreachPanelProps {
   pipelineState: Record<string, unknown> | null;
   sessionId: string | null;
   campaignId?: number;
+  onRefreshState?: () => void;
 }
 
 type SetupStep = "not_started" | "voice_setup" | "creating" | "testing" | "approving";
 
-export default function OutreachPanel({ pitches, agents, pipelineState, sessionId, campaignId }: OutreachPanelProps) {
+export default function OutreachPanel({ pitches, agents, pipelineState, sessionId, campaignId, onRefreshState }: OutreachPanelProps) {
   const [setupStep, setSetupStep] = useState<SetupStep>(agents.length > 0 ? "testing" : "not_started");
   const [testPhone, setTestPhone] = useState("");
   const [testEmail, setTestEmail] = useState("");
@@ -252,6 +253,15 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
           if (done) break;
         }
       }
+      // Refresh state to pick up newly created agents
+      onRefreshState?.();
+      // Poll a few times to ensure agents appear in state
+      let polls = 0;
+      const pollInterval = setInterval(() => {
+        onRefreshState?.();
+        polls++;
+        if (polls >= 5) clearInterval(pollInterval);
+      }, 2000);
       setSetupStep("testing");
       setVoiceStatus("Agents created! Test them below.");
     } catch {

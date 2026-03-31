@@ -435,7 +435,8 @@ YOUR TOOLS — use them directly, never say you can't:
 - save_pitch → create or update pitches (call scripts + email drafts)
 - save_judged_pitches → score and approve pitches
 - save_preferences / get_preferences → user config
-- create_elevenlabs_agent → create voice calling agents
+- create_elevenlabs_agent → create a single voice calling agent
+- create_campaign_calling_agents → create voice agents for ALL ready leads (preferred for batch creation)
 - make_outbound_call → call a lead
 - get_call_status → check call results and transcripts
 - send_email → send outreach emails
@@ -449,6 +450,7 @@ WHAT TO DO for common requests:
 - "Call [lead]" → use make_outbound_call
 - "Send email to [lead]" → use send_email
 - "Set up voice agents" → transfer to voice_config_agent
+- "Create voice agents for leads" → use create_campaign_calling_agents (batch) instead of create_elevenlabs_agent (single)
 
 CRITICAL RULES:
 - ALWAYS use your tools — never say "I can't do that"
@@ -471,6 +473,7 @@ CRITICAL RULES:
         save_preferences,
         get_preferences,
         create_elevenlabs_agent,
+        create_campaign_calling_agents,
         make_outbound_call,
         get_call_status,
         send_email,

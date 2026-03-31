@@ -417,6 +417,12 @@ export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl
             pipelineState={pipelineState}
             sessionId={sessionId}
             campaignId={campaignId}
+            onRefreshState={() => {
+              apiFetch("/api/state")
+                .then((r) => r.json())
+                .then((state) => { if (state) setPipelineState(state); })
+                .catch(() => {});
+            }}
           />
         )}
 
