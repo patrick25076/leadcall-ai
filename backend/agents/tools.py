@@ -1408,36 +1408,32 @@ RULES:
 
 @traced(type="tool", name="make_outbound_call")
 def make_outbound_call(agent_id: str, phone_number: str, dynamic_variables_json: str = "{}") -> dict:
-    """Initiates an outbound call via Twilio, connecting to ElevenLabs agent via webhook.
+    """Initiates an outbound call via ElevenLabs Conversational AI.
 
-    Flow: Twilio creates call -> hits our /twilio/outbound webhook -> webhook registers
-    the call with ElevenLabs -> returns TwiML to connect audio streams.
+    Primary: ElevenLabs direct outbound API (phone number must be imported into ElevenLabs).
+    Fallback: BYO Twilio via webhook if WEBHOOK_BASE_URL is configured.
 
     Args:
         agent_id: The ElevenLabs agent ID
         phone_number: Phone number to call (E.164 format, e.g. +40712345678)
         dynamic_variables_json: JSON string with per-call variables to override
-            (e.g. {"contact_person": "John", "lead_company": "Acme Corp"})
 
     Returns:
-        dict with status and call_sid
+        dict with status, conversation_id, and call details
     """
     api_key = os.getenv("ELEVENLABS_API_KEY", "")
-    twilio_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-    twilio_token = os.getenv("TWILIO_AUTH_TOKEN", "")
-    twilio_number = os.getenv("TWILIO_PHONE_NUMBER", "")
+    agent_phone_number_id = os.getenv("ELEVENLABS_PHONE_NUMBER_ID", "")
 
-    # Validate phone number (E.164 format, no emergency/premium numbers)
     if not validate_phone_number(phone_number):
         return {"status": "error", "error": "Invalid phone number. Must be E.164 format (e.g., +40712345678)."}
 
-    # TEST MODE: Override destination number if TEST_PHONE_OVERRIDE is set
+    # TEST MODE: Override destination number
     test_override = os.getenv("TEST_PHONE_OVERRIDE", "")
     if test_override:
         logger.info("TEST MODE: Redirecting call to test number")
         phone_number = test_override
 
-    # Merge stored dynamic vars for this agent with any overrides
+    # Merge stored dynamic vars with overrides
     stored_vars = {}
     for agent in pipeline_state.get("elevenlabs_agents", []):
         if agent.get("agent_id") == agent_id:
@@ -1451,7 +1447,7 @@ def make_outbound_call(agent_id: str, phone_number: str, dynamic_variables_json:
 
     final_vars = {**stored_vars, **override_vars}
 
-    if not api_key or not twilio_sid or not twilio_token:
+    if not api_key:
         call_info = {
             "call_id": f"mock_call_{phone_number}",
             "agent_id": agent_id,
@@ -1460,55 +1456,18 @@ def make_outbound_call(agent_id: str, phone_number: str, dynamic_variables_json:
             "dynamic_variables": final_vars,
         }
         pipeline_state["call_results"].append(call_info)
-
-        # Persist to DB
         cid = _campaign_id()
         if cid:
             save_call_db(cid, call_info)
-
         return {"status": "success", "mode": "mock", **call_info}
 
-    try:
-        # Use Twilio REST API to create the outbound call
-        # The call will hit our webhook URL which registers with ElevenLabs
-        from twilio.rest import Client as TwilioClient
-
-        twilio_client = TwilioClient(twilio_sid, twilio_token)
-
-        # Store dynamic vars temporarily for the webhook to use
-        # The webhook will look up agent_id to get these vars
-        webhook_base = os.getenv("WEBHOOK_BASE_URL", "https://your-server.com")
-        webhook_url = f"{webhook_base}/twilio/outbound?agent_id={agent_id}"
-
-        call = twilio_client.calls.create(
-            to=phone_number,
-            from_=twilio_number,
-            url=webhook_url,
-            status_callback=f"{webhook_base}/twilio/status",
-            status_callback_event=["initiated", "ringing", "answered", "completed"],
-        )
-
-        call_info = {
-            "call_sid": call.sid,
-            "agent_id": agent_id,
-            "phone_number": phone_number,
-            "status": "initiated",
-            "dynamic_variables": final_vars,
-        }
-        pipeline_state["call_results"].append(call_info)
-
-        # Persist to DB
-        cid = _campaign_id()
-        if cid:
-            save_call_db(cid, call_info)
-
-        return {"status": "success", "call_sid": call.sid, "agent_id": agent_id, "dynamic_variables": final_vars}
-    except ImportError:
-        # Twilio SDK not installed — fall back to ElevenLabs direct API
+    # ── Primary: ElevenLabs direct outbound call ──
+    # Requires phone number imported into ElevenLabs (agent_phone_number_id)
+    if agent_phone_number_id:
         try:
             payload = {
                 "agent_id": agent_id,
-                "agent_phone_number_id": twilio_number,
+                "agent_phone_number_id": agent_phone_number_id,
                 "to_number": phone_number,
             }
             if final_vars:
@@ -1517,7 +1476,7 @@ def make_outbound_call(agent_id: str, phone_number: str, dynamic_variables_json:
                 }
 
             resp = httpx.post(
-                "https://api.elevenlabs.io/v1/convai/twilio/outbound_call",
+                "https://api.elevenlabs.io/v1/convai/twilio/outbound-call",
                 headers={"xi-api-key": api_key, "Content-Type": "application/json"},
                 json=payload,
                 timeout=30,
@@ -1526,25 +1485,206 @@ def make_outbound_call(agent_id: str, phone_number: str, dynamic_variables_json:
             data = resp.json()
 
             call_info = {
-                "call_id": data.get("call_id", ""),
+                "conversation_id": data.get("conversation_id", ""),
+                "call_sid": data.get("callSid", ""),
                 "agent_id": agent_id,
                 "phone_number": phone_number,
                 "status": "initiated",
                 "dynamic_variables": final_vars,
             }
             pipeline_state["call_results"].append(call_info)
-
             cid = _campaign_id()
             if cid:
                 save_call_db(cid, call_info)
 
             return {"status": "success", **call_info}
         except Exception as e:
-            logger.error("Tool error: %s", e)
-        return {"status": "error", "error": "Operation failed. Check logs for details."}
+            logger.error("ElevenLabs outbound call error: %s", e)
+            return {"status": "error", "error": f"Outbound call failed: {e}"}
+
+    # ── Fallback: BYO Twilio via webhook ──
+    twilio_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
+    twilio_token = os.getenv("TWILIO_AUTH_TOKEN", "")
+    twilio_number = os.getenv("TWILIO_PHONE_NUMBER", "")
+    webhook_base = os.getenv("WEBHOOK_BASE_URL", "")
+
+    if twilio_sid and twilio_token and webhook_base:
+        try:
+            from twilio.rest import Client as TwilioClient
+            twilio_client = TwilioClient(twilio_sid, twilio_token)
+            webhook_url = f"{webhook_base}/twilio/outbound?agent_id={agent_id}"
+
+            call = twilio_client.calls.create(
+                to=phone_number,
+                from_=twilio_number,
+                url=webhook_url,
+                status_callback=f"{webhook_base}/twilio/status",
+                status_callback_event=["initiated", "ringing", "answered", "completed"],
+            )
+
+            call_info = {
+                "call_sid": call.sid,
+                "agent_id": agent_id,
+                "phone_number": phone_number,
+                "status": "initiated",
+                "dynamic_variables": final_vars,
+            }
+            pipeline_state["call_results"].append(call_info)
+            cid = _campaign_id()
+            if cid:
+                save_call_db(cid, call_info)
+
+            return {"status": "success", "call_sid": call.sid, "agent_id": agent_id}
+        except Exception as e:
+            logger.error("Twilio outbound call error: %s", e)
+            return {"status": "error", "error": f"Twilio call failed: {e}"}
+
+    return {
+        "status": "error",
+        "error": "No calling method configured. Set ELEVENLABS_PHONE_NUMBER_ID for direct calls, or TWILIO_ACCOUNT_SID + WEBHOOK_BASE_URL for Twilio calls.",
+    }
+
+
+@traced(type="tool", name="submit_batch_calls")
+def submit_batch_calls(
+    agent_id: str,
+    call_name: str = "",
+    leads_json: str = "[]",
+    concurrency_limit: int = 3,
+    scheduled_time_unix: int = 0,
+    timezone: str = "Europe/Bucharest",
+) -> dict:
+    """Submit a batch of outbound calls via ElevenLabs batch calling API.
+
+    Args:
+        agent_id: The ElevenLabs agent ID to use for all calls
+        call_name: Name for this batch campaign (e.g. "March Outreach")
+        leads_json: JSON array of leads with phone_number and dynamic variables
+        concurrency_limit: Max simultaneous calls (1-10, default 3)
+        scheduled_time_unix: Unix timestamp to start (0 = now)
+        timezone: Timezone for scheduling (default Europe/Bucharest)
+
+    Returns:
+        dict with batch_id, status, and counts
+    """
+    api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    phone_number_id = os.getenv("ELEVENLABS_PHONE_NUMBER_ID", "")
+
+    if not api_key:
+        return {"status": "error", "error": "ELEVENLABS_API_KEY not configured"}
+    if not phone_number_id:
+        return {"status": "error", "error": "ELEVENLABS_PHONE_NUMBER_ID not configured. Import a phone number into ElevenLabs first."}
+
+    try:
+        leads = json.loads(leads_json) if leads_json else []
+    except json.JSONDecodeError:
+        return {"status": "error", "error": "Invalid leads_json format"}
+
+    if not leads:
+        # Auto-load from pipeline state
+        judged = pipeline_state.get("judged_pitches", [])
+        scored = pipeline_state.get("scored_leads", [])
+        phone_lookup = {l.get("name", ""): l.get("phone", "") for l in scored if l.get("phone")}
+
+        for p in judged:
+            phone = p.get("phone_number") or phone_lookup.get(p.get("lead_name", ""), "")
+            if phone and validate_phone_number(phone):
+                leads.append({
+                    "phone_number": phone,
+                    "dynamic_variables": {
+                        "lead_name": p.get("lead_name", ""),
+                        "contact_person": p.get("contact_person", ""),
+                        "pitch_script": p.get("revised_pitch") or p.get("pitch_script", ""),
+                        "lead_industry": p.get("industry", ""),
+                    },
+                })
+
+    if not leads:
+        return {"status": "error", "error": "No leads with valid phone numbers found"}
+
+    if not call_name:
+        bname = (pipeline_state.get("business_analysis") or {}).get("business_name", "Campaign")
+        call_name = f"{bname} Outreach"
+
+    # Build recipients
+    recipients = []
+    for i, lead in enumerate(leads):
+        recipient = {
+            "phone_number": lead.get("phone_number", ""),
+        }
+        dvars = lead.get("dynamic_variables", {})
+        if dvars:
+            recipient["conversation_initiation_client_data"] = {
+                "dynamic_variables": dvars,
+            }
+        recipients.append(recipient)
+
+    payload = {
+        "call_name": call_name,
+        "agent_id": agent_id,
+        "agent_phone_number_id": phone_number_id,
+        "recipients": recipients,
+        "target_concurrency_limit": min(max(concurrency_limit, 1), 10),
+        "timezone": timezone,
+    }
+    if scheduled_time_unix > 0:
+        payload["scheduled_time_unix"] = scheduled_time_unix
+
+    try:
+        resp = httpx.post(
+            "https://api.elevenlabs.io/v1/convai/batch-calling/submit",
+            headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+            json=payload,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        batch_id = data.get("id", "")
+        logger.info("Batch call submitted: %s with %d recipients", batch_id, len(recipients))
+
+        return {
+            "status": "success",
+            "batch_id": batch_id,
+            "batch_name": data.get("name", call_name),
+            "total_calls_scheduled": data.get("total_calls_scheduled", len(recipients)),
+            "batch_status": data.get("status", "pending"),
+        }
     except Exception as e:
-        logger.error("Tool error: %s", e)
-        return {"status": "error", "error": "Operation failed. Check logs for details."}
+        logger.error("Batch call error: %s", e)
+        return {"status": "error", "error": str(e)}
+
+
+@traced(type="tool", name="get_batch_call_status")
+def get_batch_call_status(batch_id: str) -> dict:
+    """Get the status of a batch calling job.
+
+    Args:
+        batch_id: The batch job ID returned from submit_batch_calls
+    """
+    api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    if not api_key:
+        return {"status": "error", "error": "ELEVENLABS_API_KEY not configured"}
+
+    try:
+        resp = httpx.get(
+            f"https://api.elevenlabs.io/v1/convai/batch-calling/{batch_id}",
+            headers={"xi-api-key": api_key},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "status": "success",
+            "batch_id": batch_id,
+            "batch_status": data.get("status", "unknown"),
+            "total_scheduled": data.get("total_calls_scheduled", 0),
+            "total_dispatched": data.get("total_calls_dispatched", 0),
+            "total_finished": data.get("total_calls_finished", 0),
+        }
+    except Exception as e:
+        logger.error("Batch status error: %s", e)
+        return {"status": "error", "error": str(e)}
 
 
 @traced(type="tool", name="get_call_status")

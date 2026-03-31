@@ -33,6 +33,8 @@ from .tools import (
     configure_voice_agent,
     get_voice_agent_config,
     send_email,
+    submit_batch_calls,
+    get_batch_call_status,
     create_knowledge_base,
     upload_kb_document,
     attach_kb_to_agent,
@@ -267,6 +269,8 @@ When asked about results:
         build_campaign_kb,
         attach_kb_to_agent,
         read_kb_documents,
+        submit_batch_calls,
+        get_batch_call_status,
     ],
 )
 
@@ -496,5 +500,7 @@ CRITICAL RULES:
         create_knowledge_base,
         upload_kb_document,
         attach_kb_to_agent,
+        submit_batch_calls,
+        get_batch_call_status,
     ],
 )

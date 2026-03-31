@@ -957,7 +957,7 @@ async def twilio_outbound_handler(request: Request):
 
         async with _httpx.AsyncClient() as client:
             resp = await client.post(
-                "https://api.elevenlabs.io/v1/convai/twilio/register_call",
+                "https://api.elevenlabs.io/v1/convai/twilio/register-call",
                 headers={"xi-api-key": elevenlabs_key, "Content-Type": "application/json"},
                 json=payload,
                 timeout=15,
@@ -1012,6 +1012,8 @@ from agents.tools import (
     create_knowledge_base as _create_kb_tool,
     upload_kb_document as _upload_kb_doc_tool,
     attach_kb_to_agent as _attach_kb_tool,
+    submit_batch_calls as _submit_batch_calls_tool,
+    get_batch_call_status as _get_batch_status_tool,
 )
 from db import get_campaign_dynamic_vars as _get_campaign_dvars
 
@@ -1032,6 +1034,8 @@ _VOICE_TOOLS = {
     "upload_kb_document": _upload_kb_doc_tool,
     "attach_kb_to_agent": _attach_kb_tool,
     "get_campaign_dynamic_vars": _get_campaign_dvars,
+    "submit_batch_calls": _submit_batch_calls_tool,
+    "get_batch_call_status": _get_batch_status_tool,
 }
 
 # System instruction for the live voice agent (from agent.py)
