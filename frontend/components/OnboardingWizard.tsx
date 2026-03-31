@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { supabase } from "../lib/supabase";
+import { apiFetch } from "@/lib/api";
 
 type Step = "auth" | "website" | "email" | "phone" | "done";
 
@@ -18,8 +19,6 @@ export interface OnboardingConfig {
   verifiedPhone?: string;
   sessionId?: string;
 }
-
-const API = process.env.NEXT_PUBLIC_API_URL || "";
 
 export default function OnboardingWizard({ onComplete, onHasCampaigns }: OnboardingWizardProps) {
   const [step, setStep] = useState<Step>("auth");
@@ -52,9 +51,7 @@ export default function OnboardingWizard({ onComplete, onHasCampaigns }: Onboard
       // If caller provided onHasCampaigns, check if user already has campaigns
       if (onHasCampaigns) {
         try {
-          const resp = await fetch(`${API}/api/campaigns`, {
-            headers: { Authorization: `Bearer ${session.access_token}` },
-          });
+          const resp = await apiFetch("/api/campaigns");
           if (resp.ok) {
             const data = await resp.json();
             const campaigns = data.campaigns || data || [];
@@ -131,7 +128,7 @@ export default function OnboardingWizard({ onComplete, onHasCampaigns }: Onboard
     setAnalysisStatus("Starting analysis...");
 
     try {
-      const response = await fetch(`${API}/api/analyze`, {
+      const response = await apiFetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: websiteUrl }),
@@ -208,7 +205,7 @@ export default function OnboardingWizard({ onComplete, onHasCampaigns }: Onboard
     setPhoneVerifying(true);
 
     try {
-      const resp = await fetch(`${API}/api/phone/verify`, {
+      const resp = await apiFetch("/api/phone/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

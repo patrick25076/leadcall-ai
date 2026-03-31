@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { analytics } from "@/lib/analytics";
+import { apiFetch } from "@/lib/api";
 import LeadTable from "./LeadTable";
 import ActivityFeed from "./ActivityFeed";
 import OutreachPanel from "./OutreachPanel";
@@ -20,8 +21,6 @@ export type AgentEvent = {
 };
 
 type Tab = "activity" | "leads" | "outreach" | "results" | "logs";
-
-const API = process.env.NEXT_PUBLIC_API_URL || "";
 
 function loadFromStorage<T>(key: string, fallback: T): T {
   try {
@@ -49,11 +48,11 @@ export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl
     if (savedSession) setSessionId(savedSession);
 
     // Use campaign-scoped state if we have a campaignId
-    const stateUrl = campaignId
-      ? `${API}/api/campaigns/${campaignId}/state`
-      : `${API}/api/state`;
+    const statePath = campaignId
+      ? `/api/campaigns/${campaignId}/state`
+      : `/api/state`;
 
-    fetch(stateUrl)
+    apiFetch(statePath)
       .then((r) => r.json())
       .then((state) => {
         if (state && (state.business_analysis || state.leads?.length)) {
@@ -81,7 +80,7 @@ export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl
     let staleCount = 0;
 
     const poll = () => {
-      fetch(`${API}/api/state`)
+      apiFetch("/api/state")
         .then((r) => r.json())
         .then((state) => {
           if (!state) return;
@@ -136,7 +135,7 @@ export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl
 
     // Fetch latest state from the server
     const refreshState = () => {
-      fetch(`${API}/api/state`)
+      apiFetch("/api/state")
         .then((r) => r.json())
         .then((state) => {
           if (state) setPipelineState(state);
@@ -198,7 +197,7 @@ export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl
     setError(null);
 
     try {
-      const response = await fetch(`${API}/api/analyze`, {
+      const response = await apiFetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: targetUrl.trim() }),
@@ -237,7 +236,7 @@ export default function Dashboard({ onLogout, campaignId, onBack, autoAnalyzeUrl
     }]);
 
     try {
-      const response = await fetch(`${API}/api/chat`, {
+      const response = await apiFetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message, session_id: sessionId }),

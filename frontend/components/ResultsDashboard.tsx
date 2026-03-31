@@ -1,8 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-
-const API = process.env.NEXT_PUBLIC_API_URL || "";
+import { apiFetch } from "@/lib/api";
 
 type Call = Record<string, unknown>;
 type Lead = Record<string, unknown>;
@@ -29,7 +28,7 @@ export default function ResultsDashboard({ calls, leads, agents, campaignId }: R
 
   useEffect(() => {
     if (!campaignId) return;
-    fetch(`${API}/api/campaigns/${campaignId}/analytics`)
+    apiFetch(`/api/campaigns/${campaignId}/analytics`)
       .then((r) => r.json())
       .then((data) => {
         if (data.analytics) setAnalytics(data.analytics);

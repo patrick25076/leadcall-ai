@@ -7,8 +7,7 @@ import OnboardingWizard, { type OnboardingConfig } from "@/components/Onboarding
 import Dashboard from "@/components/Dashboard";
 import CampaignList from "@/components/CampaignList";
 import { supabase } from "@/lib/supabase";
-
-const API = process.env.NEXT_PUBLIC_API_URL || "";
+import { apiFetch } from "@/lib/api";
 
 type View = "loading" | "onboarding" | "campaigns" | "dashboard";
 
@@ -21,11 +20,9 @@ export default function Home() {
   useEffect(() => { viewRef.current = view; }, [view]);
 
   useEffect(() => {
-    async function checkCampaigns(accessToken: string): Promise<boolean> {
+    async function checkCampaigns(): Promise<boolean> {
       try {
-        const resp = await fetch(`${API}/api/campaigns`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        });
+        const resp = await apiFetch("/api/campaigns");
         if (resp.ok) {
           const data = await resp.json();
           const campaigns = data.campaigns || data || [];
@@ -41,7 +38,7 @@ export default function Home() {
     // Initial session check
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (session?.user) {
-        const hasCampaigns = await checkCampaigns(session.access_token);
+        const hasCampaigns = await checkCampaigns();
         if (!hasCampaigns) setView("onboarding");
       } else {
         setView("onboarding");
@@ -55,7 +52,7 @@ export default function Home() {
         const current = viewRef.current;
         if (current !== "loading" && current !== "onboarding") return;
         if (session?.user) {
-          const hasCampaigns = await checkCampaigns(session.access_token);
+          const hasCampaigns = await checkCampaigns();
           if (!hasCampaigns) setView("onboarding");
         }
       }

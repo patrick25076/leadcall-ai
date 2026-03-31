@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { apiFetch } from "@/lib/api";
 import VoiceSelector from "./VoiceSelector";
 
 type Pitch = Record<string, unknown>;
@@ -235,7 +236,7 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
 
     setVoiceStatus(`Creating ${leadsToCreate.length} agent${leadsToCreate.length !== 1 ? "s" : ""}...`);
     try {
-      const resp = await fetch(`${API}/api/chat`, {
+      const resp = await apiFetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -272,7 +273,7 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
     }
 
     try {
-      const resp = await fetch(`${API}/api/call`, {
+      const resp = await apiFetch("/api/call", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -365,7 +366,7 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
                     setSelectedVoiceName(name);
                     setShowVoiceSelector(false);
                     // Save voice to preferences
-                    fetch(`${API}/api/voice-config`, {
+                    apiFetch("/api/voice-config", {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({ voice_id: id }),
@@ -611,7 +612,7 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
                         ? readyToCall.filter((p) => approvedLeads.has(String(p.lead_name)))
                         : readyToCall;
                       try {
-                        const resp = await fetch(`${API}/api/campaigns/${campaignId}/batch-call`, {
+                        const resp = await apiFetch(`/api/campaigns/${campaignId}/batch-call`, {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({
@@ -697,7 +698,7 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
                       if (!campaignId) return;
                       setBatchStatus("Sending emails...");
                       try {
-                        const resp = await fetch(`${API}/api/campaigns/${campaignId}/batch-email`, {
+                        const resp = await apiFetch(`/api/campaigns/${campaignId}/batch-email`, {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({ lead_names: [] }),
@@ -750,7 +751,7 @@ export default function OutreachPanel({ pitches, agents, pipelineState, sessionI
                     if (!testEmail.trim() || !readyToEmail[0]) return;
                     const first = readyToEmail[0];
                     try {
-                      const resp = await fetch(`${API}/api/chat`, {
+                      const resp = await apiFetch("/api/chat", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({
