@@ -411,6 +411,18 @@ def save_agent_db(campaign_id: int, agent_data: dict) -> int:
     return result.data[0]["id"] if result.data else 0
 
 
+def update_agent_db(agent_id: str, agent_data: dict) -> None:
+    if not is_configured() or not agent_id:
+        return
+    get_db().table("agents").update({
+        "agent_name": agent_data.get("name", ""),
+        "first_message": agent_data.get("first_message_template", ""),
+        "system_prompt": agent_data.get("system_prompt", ""),
+        "dynamic_vars": agent_data.get("dynamic_variables", {}),
+        "language": agent_data.get("language", "en"),
+    }).eq("agent_id", agent_id).execute()
+
+
 # ─── Call CRUD ───────────────────────────────────────────────────────────────
 
 def save_call_db(campaign_id: int, call_data: dict) -> int:

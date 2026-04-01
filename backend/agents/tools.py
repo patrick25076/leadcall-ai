@@ -68,6 +68,7 @@ from db import (
     save_pitches_db,
     update_judged_pitches_db,
     save_agent_db,
+    update_agent_db,
     save_call_db,
     save_prefs_db,
     get_prefs_db,
@@ -1001,6 +1002,7 @@ def upload_kb_document(doc_type: str, content: str, name: str = "",
         resp.raise_for_status()
         data = resp.json()
         doc_id = data.get("id", "")
+        rag_index = _trigger_kb_rag_index(doc_id, content)
 
         # Save to DB
         db.save_kb_document(
@@ -1009,7 +1011,13 @@ def upload_kb_document(doc_type: str, content: str, name: str = "",
             content_hash=content_hash, char_count=len(content),
         )
         logger.info("Uploaded KB doc %s (%s, %d chars)", doc_id, doc_type, len(content))
-        return {"status": "success", "doc_id": doc_id, "doc_type": doc_type, "name": name}
+        return {
+            "status": "success",
+            "doc_id": doc_id,
+            "doc_type": doc_type,
+            "name": name,
+            "rag_index": rag_index,
+        }
     except Exception as e:
         logger.error("Upload KB doc error: %s", e)
         return {"status": "error", "error": str(e)}
@@ -1184,6 +1192,68 @@ def build_campaign_kb(campaign_id: int = 0) -> dict:
     }
 
 
+def _language_name(language_code: str) -> str:
+    code = (language_code or "").strip().lower()
+    return {
+        "ro": "Romanian",
+        "en": "English",
+        "de": "German",
+        "fr": "French",
+        "es": "Spanish",
+        "it": "Italian",
+    }.get(code, code or "English")
+
+
+def _default_closing_cta(language_code: str) -> str:
+    if (language_code or "").strip().lower() == "ro":
+        return "Putem programa 15 minute saptamana aceasta ca sa discutam mai concret?"
+    return "Can we schedule 15 minutes this week to discuss this further?"
+
+
+def _default_pricing_guidance(language_code: str) -> str:
+    if (language_code or "").strip().lower() == "ro":
+        return "Preturile se comunica doar daca lead-ul intreaba direct."
+    return "Pricing should only be discussed if the lead asks for it."
+
+
+def _build_first_message(language_code: str, caller_name: str, lead_name: str) -> str:
+    if (language_code or "").strip().lower() == "ro":
+        return (
+            f"Buna {{{{contact_person}}}}, sunt {caller_name} de la {{{{your_company}}}}. "
+            f"Va sun pentru ca cred ca am putea ajuta {lead_name}."
+        )
+    return (
+        f"Hi {{{{contact_person}}}}, this is {caller_name} from {{{{your_company}}}}. "
+        f"I'm reaching out because I think we may be able to help {lead_name}."
+    )
+
+
+def _trigger_kb_rag_index(doc_id: str, content: str) -> dict:
+    api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    if not api_key or not doc_id:
+        return {"status": "skipped"}
+    if len((content or "").encode("utf-8")) < 500:
+        return {"status": "skipped", "reason": "Document smaller than 500 bytes"}
+
+    rag_model = os.getenv("ELEVENLABS_RAG_MODEL", "multilingual_e5_large_instruct")
+    try:
+        resp = httpx.post(
+            f"https://api.elevenlabs.io/v1/convai/knowledge-base/{doc_id}/rag-index",
+            headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+            json={"model": rag_model},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "status": data.get("status", "processing"),
+            "model": data.get("model", rag_model),
+        }
+    except Exception as e:
+        logger.warning("KB RAG indexing failed for %s: %s", doc_id, e)
+        return {"status": "error", "error": str(e)}
+
+
 @traced(type="tool", name="create_elevenlabs_agent")
 def create_elevenlabs_agent(
     agent_name: str,
@@ -1198,6 +1268,8 @@ def create_elevenlabs_agent(
     pitch_script: str = "",
     call_objective: str = "",
     language: str = "en",
+    dynamic_variables_override: dict | None = None,
+    existing_agent_id: str = "",
 ) -> dict:
     """Creates a personalized ElevenLabs conversational agent for outbound SDR calls.
 
@@ -1238,6 +1310,8 @@ def create_elevenlabs_agent(
         "call_objective": call_objective or prefs.get("objective", "Book a demo meeting"),
         "call_style": voice_context.get("call_style") or prefs.get("call_style", "professional"),
     }
+    if dynamic_variables_override:
+        dynamic_variables.update(dynamic_variables_override)
 
     # Ensure first_message and system_prompt use {{variable}} template syntax
     if "{{" not in first_message:
@@ -1266,7 +1340,7 @@ RULES:
 {system_prompt}"""
 
     if not api_key:
-        mock_id = f"mock_agent_{agent_name.replace(' ', '_').lower()}"
+        mock_id = existing_agent_id or f"mock_agent_{agent_name.replace(' ', '_').lower()}"
         agent_info = {
             "agent_id": mock_id,
             "name": agent_name,
@@ -1274,13 +1348,24 @@ RULES:
             "dynamic_variables": dynamic_variables,
             "first_message_template": first_message,
             "system_prompt": system_prompt,
+            "language": language,
         }
-        pipeline_state["elevenlabs_agents"].append(agent_info)
+        updated = False
+        for idx, existing in enumerate(pipeline_state["elevenlabs_agents"]):
+            if existing.get("agent_id") == mock_id:
+                pipeline_state["elevenlabs_agents"][idx] = {**existing, **agent_info}
+                updated = True
+                break
+        if not updated:
+            pipeline_state["elevenlabs_agents"].append(agent_info)
 
         # Persist to DB
         cid = _campaign_id()
         if cid:
-            save_agent_db(cid, agent_info)
+            if existing_agent_id:
+                update_agent_db(mock_id, agent_info)
+            else:
+                save_agent_db(cid, agent_info)
 
         return {"status": "success", **agent_info}
 
@@ -1289,7 +1374,12 @@ RULES:
         voice_cfg = prefs.get("voice_config", {})
         voice_id = voice_cfg.get("voice_id", "JBFqnCBsd6RMkjVDRZzb")
         objective_label = voice_cfg.get("objective", call_objective or "book_demo")
-        llm_id = os.getenv("ELEVENLABS_AGENT_LLM", "gemini-2.0-flash-001")
+        llm_id = voice_cfg.get("agent_llm") or os.getenv("ELEVENLABS_AGENT_LLM", "gemini-2.5-flash")
+        tts_model_id = voice_cfg.get("tts_model_id") or os.getenv("ELEVENLABS_TTS_MODEL", "eleven_multilingual_v2")
+        latency_mode = int(voice_cfg.get("optimize_streaming_latency", os.getenv("ELEVENLABS_TTS_LATENCY_MODE", "1")))
+        disable_first_message_interruptions = bool(
+            voice_cfg.get("disable_first_message_interruptions", True)
+        )
 
         # Build evaluation criteria based on call objective
         evaluation_criteria = [
@@ -1364,6 +1454,7 @@ RULES:
                     },
                     "first_message": first_message,
                     "language": language,
+                    "disable_first_message_interruptions": disable_first_message_interruptions,
                     "dynamic_variables": {
                         "dynamic_variable_placeholders": dynamic_variables,
                     },
@@ -1379,13 +1470,13 @@ RULES:
                 },
                 "tts": {
                     "voice_id": voice_id,
-                    "model_id": "eleven_flash_v2_5",
+                    "model_id": tts_model_id,
                     "agent_output_audio_format": "pcm_16000",
-                    "optimize_streaming_latency": 3,
+                    "optimize_streaming_latency": latency_mode,
                     "speed": float(voice_cfg.get("voice_speed", 1.0)),
                 },
                 "turn": {
-                    "turn_timeout": 10,
+                    "turn_timeout": int(voice_cfg.get("turn_timeout", 12)),
                     "turn_eagerness": "patient",
                 },
                 "conversation": {
@@ -1399,15 +1490,21 @@ RULES:
             },
         }
 
-        resp = httpx.post(
-            "https://api.elevenlabs.io/v1/convai/agents/create",
+        request_url = "https://api.elevenlabs.io/v1/convai/agents/create"
+        request_method = httpx.post
+        if existing_agent_id:
+            request_url = f"https://api.elevenlabs.io/v1/convai/agents/{existing_agent_id}"
+            request_method = httpx.patch
+
+        resp = request_method(
+            request_url,
             headers={"xi-api-key": api_key, "Content-Type": "application/json"},
             json=agent_config,
             timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
-        agent_id = data.get("agent_id", "")
+        agent_id = data.get("agent_id", "") or existing_agent_id
 
         agent_info = {
             "agent_id": agent_id,
@@ -1416,13 +1513,26 @@ RULES:
             "first_message_template": first_message,
             "system_prompt": system_prompt,
             "language": language,
+            "llm": llm_id,
+            "tts_model_id": tts_model_id,
+            "voice_id": voice_id,
         }
-        pipeline_state["elevenlabs_agents"].append(agent_info)
+        updated = False
+        for idx, existing in enumerate(pipeline_state["elevenlabs_agents"]):
+            if existing.get("agent_id") == agent_id:
+                pipeline_state["elevenlabs_agents"][idx] = {**existing, **agent_info}
+                updated = True
+                break
+        if not updated:
+            pipeline_state["elevenlabs_agents"].append(agent_info)
 
         # Persist to DB
         cid = _campaign_id()
         if cid:
-            save_agent_db(cid, agent_info)
+            if existing_agent_id:
+                update_agent_db(agent_id, agent_info)
+            else:
+                save_agent_db(cid, agent_info)
 
         # Auto-attach KB documents if any exist for this campaign
         if cid and agent_id:
@@ -2048,6 +2158,8 @@ def assess_voice_readiness() -> dict:
     business_hours = voice_context.get("business_hours")
     availability_rules = voice_context.get("availability_rules")
     additional_context = voice_context.get("additional_context")
+    language_override = voice_context.get("language_override") or prefs.get("language_override")
+    detected_language = (analysis or {}).get("language_code") or ""
 
     checklist["call_style_set"] = bool(call_style)
     checklist["objective_set"] = bool(objective)
@@ -2056,6 +2168,7 @@ def assess_voice_readiness() -> dict:
     checklist["business_hours_set"] = bool(business_hours)
     checklist["availability_rules_set"] = bool(availability_rules)
     checklist["additional_context_set"] = bool(additional_context)
+    checklist["language_override_set"] = bool(language_override)
 
     if not caller_name:
         missing.append("caller_name — who is making the call? Need a name for the agent to use")
@@ -2095,6 +2208,13 @@ def assess_voice_readiness() -> dict:
             "key": "call_style",
             "priority": "optional",
             "prompt": "How should the agent sound: professional, friendly, consultative, or assertive?",
+        })
+    if not language_override:
+        detected_name = _language_name(detected_language)
+        question_plan.append({
+            "key": "language_override",
+            "priority": "optional",
+            "prompt": f"What language should the calling agent use with leads? I currently detect {detected_name}.",
         })
     if not closing_cta:
         question_plan.append({
@@ -2139,6 +2259,7 @@ def assess_voice_readiness() -> dict:
             "call_style": call_style or "",
             "closing_cta": closing_cta or "",
             "pricing_override": pricing_override or "",
+            "language_override": language_override or detected_language,
             "business_hours": business_hours or "",
             "availability_rules": availability_rules or "",
             "additional_context": additional_context or "",
@@ -2185,6 +2306,11 @@ def configure_voice_agent(config_json: str) -> dict:
             business_hours (str): When to call (e.g. "9:00-18:00 Mon-Fri")
             availability_rules (str): When the team is available for meetings/follow-ups
             language_override (str): Override detected language (2-letter code)
+            agent_llm (str): Preferred LLM for the ElevenLabs agent
+            tts_model_id (str): Preferred ElevenLabs TTS model for the agent
+            optimize_streaming_latency (int): Lower = better quality, higher = lower latency
+            disable_first_message_interruptions (bool): Prevent barge-in during the opening
+            turn_timeout (int): Turn timeout seconds
 
     Returns:
         dict with saved config
@@ -2216,6 +2342,12 @@ def configure_voice_agent(config_json: str) -> dict:
             "additional_context",
             "voice_id",
             "voice_speed",
+            "language_override",
+            "agent_llm",
+            "tts_model_id",
+            "optimize_streaming_latency",
+            "disable_first_message_interruptions",
+            "turn_timeout",
         ]:
             if key in config:
                 pipeline_state["preferences"][key] = config[key]
@@ -2239,6 +2371,11 @@ def configure_voice_agent(config_json: str) -> dict:
                     "language_override",
                     "voice_id",
                     "voice_speed",
+                    "agent_llm",
+                    "tts_model_id",
+                    "optimize_streaming_latency",
+                    "disable_first_message_interruptions",
+                    "turn_timeout",
                 }
             }
             if dynamic_vars_payload:
@@ -2332,9 +2469,38 @@ def get_voice_agent_config() -> dict:
     }
 
 
+def _campaign_agent_name(business_name: str) -> str:
+    return f"Campaign SDR for {business_name or 'Business'}"
+
+
+def _find_campaign_calling_agent() -> dict:
+    for agent in pipeline_state.get("elevenlabs_agents", []):
+        vars_map = agent.get("dynamic_variables", {}) or {}
+        if vars_map.get("agent_role") == "campaign_outbound":
+            return agent
+        if str(agent.get("name", "")).startswith("Campaign SDR for "):
+            return agent
+    return {}
+
+
+def _lead_call_dynamic_vars(lead: dict, business_name: str, services_summary: str, objective: str, call_style: str) -> dict:
+    lead_name = str(lead.get("lead_name") or lead.get("lead_company") or "Lead").strip()
+    return {
+        "lead_name": lead_name,
+        "lead_company": lead_name,
+        "lead_industry": str(lead.get("industry") or lead.get("lead_industry") or "").strip(),
+        "contact_person": str(lead.get("contact_person") or lead_name or "there").strip(),
+        "pitch_script": str(lead.get("revised_pitch") or lead.get("pitch_script") or lead.get("pitch") or "").strip(),
+        "your_company": business_name,
+        "your_services": services_summary,
+        "call_objective": objective,
+        "call_style": call_style,
+    }
+
+
 @traced(type="tool", name="create_campaign_calling_agents")
 def create_campaign_calling_agents(max_agents: int = 0, selected_lead_names_json: str = "[]") -> dict:
-    """Create outbound calling agents for all ready leads using saved campaign context."""
+    """Create or update a single reusable outbound campaign agent."""
     readiness = assess_voice_readiness()
     if not readiness.get("ready_to_create_agents"):
         return {
@@ -2383,33 +2549,37 @@ def create_campaign_calling_agents(max_agents: int = 0, selected_lead_names_json
     caller_name = merged_context.get("caller_name", "").strip()
     objective = merged_context.get("objective", "").strip()
     call_style = (merged_context.get("call_style") or "professional").strip()
-    closing_cta = (merged_context.get("closing_cta") or "Can we schedule 15 minutes this week?").strip()
+    language = (voice_cfg.get("language_override") or analysis.get("language_code") or "en").strip().lower()
+    language_name = _language_name(language)
+    closing_cta = (merged_context.get("closing_cta") or _default_closing_cta(language)).strip()
     pricing_context = (
         merged_context.get("pricing_override")
         or merged_context.get("website_pricing")
-        or "Pricing should only be discussed if the lead asks for it."
+        or _default_pricing_guidance(language)
     )
     business_hours = merged_context.get("business_hours", "").strip()
     availability_rules = merged_context.get("availability_rules", "").strip()
     additional_context = merged_context.get("additional_context", "").strip()
     business_name = analysis.get("business_name", "our company")
     services_summary = ", ".join(analysis.get("services", [])[:6]) or "our services"
-    language = analysis.get("language_code") or voice_cfg.get("language_override") or "en"
 
-    created = []
-    errors = []
+    existing_campaign_agent = _find_campaign_calling_agent()
+    sample_lead = ready_leads[0]
+    default_lead_vars = _lead_call_dynamic_vars(
+        sample_lead,
+        business_name=business_name,
+        services_summary=services_summary,
+        objective=objective,
+        call_style=call_style,
+    )
+    default_lead_vars["agent_role"] = "campaign_outbound"
 
-    for lead in ready_leads:
-        lead_name = lead.get("lead_name") or "Lead"
-        contact_person = lead.get("contact_person") or lead_name
-        pitch_script = lead.get("pitch_script") or ""
-        first_message = (
-            f"Hi {{{{contact_person}}}}, this is {caller_name} from {{{{your_company}}}}. "
-            f"I'm reaching out because I think we may be able to help {lead_name}."
-        )
-        system_prompt = f"""You are {caller_name}, calling on behalf of {{{{your_company}}}}.
+    first_message = _build_first_message(language, caller_name, "{{lead_company}}")
+    system_prompt = f"""You are {caller_name}, calling on behalf of {{{{your_company}}}}.
 Your tone must be {call_style}, confident, and concise.
 Your goal is: {objective}.
+Conversation language: {language_name}.
+You must speak only in {language_name} unless the callee explicitly asks to switch languages.
 
 Business context:
 - Company: {business_name}
@@ -2435,38 +2605,43 @@ Rules:
 - If the lead is interested, use this CTA: {closing_cta}
 - If the lead is not the right person, ask who the correct person is.
 """
-        result = create_elevenlabs_agent(
-            agent_name=f"SDR for {lead_name}",
-            first_message=first_message,
-            system_prompt=system_prompt,
-            lead_name=lead_name,
-            lead_company=lead_name,
-            lead_industry="",
-            contact_person=contact_person,
-            your_company=business_name,
-            your_services=services_summary,
-            pitch_script=pitch_script,
-            call_objective=objective,
-            language=language,
-        )
-        if result.get("status") == "success":
-            created.append({
-                "lead_name": lead_name,
-                "agent_id": result.get("agent_id", ""),
-            })
-        else:
-            errors.append({
-                "lead_name": lead_name,
-                "error": result.get("error", "Unknown error"),
-            })
+    result = create_elevenlabs_agent(
+        agent_name=_campaign_agent_name(business_name),
+        first_message=first_message,
+        system_prompt=system_prompt,
+        lead_name="Lead",
+        lead_company="Lead",
+        lead_industry="",
+        contact_person="there",
+        your_company=business_name,
+        your_services=services_summary,
+        pitch_script="{{pitch_script}}",
+        call_objective=objective,
+        language=language,
+        dynamic_variables_override=default_lead_vars,
+        existing_agent_id=str(existing_campaign_agent.get("agent_id") or ""),
+    )
+    if result.get("status") != "success":
+        return {
+            "status": "error",
+            "error": result.get("error", "Unknown error"),
+            "selected_leads": sorted(selected_set),
+        }
 
     return {
-        "status": "success" if created else "error",
-        "created_count": len(created),
-        "error_count": len(errors),
+        "status": "success",
+        "created_count": 1,
+        "error_count": 0,
         "selected_leads": sorted(selected_set),
-        "created_agents": created,
-        "errors": errors,
+        "created_agents": [{
+            "agent_id": result.get("agent_id", ""),
+            "name": _campaign_agent_name(business_name),
+            "agent_role": "campaign_outbound",
+        }],
+        "errors": [],
+        "mode": "updated" if existing_campaign_agent else "created",
+        "campaign_agent_id": result.get("agent_id", ""),
+        "ready_lead_count": len(ready_leads),
     }
 
 

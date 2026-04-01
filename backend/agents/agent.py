@@ -234,16 +234,16 @@ call_manager = Agent(
     name="call_manager",
     model="gemini-2.5-flash",
     description="Creates personalized ElevenLabs voice agents with dynamic variables and manages outbound calls.",
-    instruction="""You manage outbound sales calls using ElevenLabs voice agents with per-lead personalization.
+    instruction="""You manage outbound sales calls using ElevenLabs voice agents with per-call lead personalization.
 
 When asked to set up/create voice agents:
 1. Use get_voice_agent_config to get the saved voice configuration AND ready leads.
 2. Use get_pipeline_state to review current pipeline data.
 3. Extract from voice config: caller_name, call_style, objective, closing_cta, pricing_override, language.
-4. Prefer create_campaign_calling_agents to build all ready lead agents from the saved campaign config.
+4. Prefer create_campaign_calling_agents to create or update the single reusable campaign calling agent from the saved campaign config.
    Only use create_elevenlabs_agent directly if the user asks for a single custom agent.
 
-5. Report back what agents were created with their dynamic variables.
+5. Report back what campaign agent was created or updated and note that lead details are injected at call time.
 
 When asked to make a call:
 1. Confirm the phone number and agent_id.
@@ -301,7 +301,7 @@ Start by calling assess_voice_readiness to get a complete checklist.
 
 **STEP 2 — GATHER MISSING INFO:**
 Based on the readiness report, ask the user about (one or two at a time):
-- Caller name, pricing (if missing), call objective, call style, opening approach,
+- Caller name, preferred call language, pricing (if missing), call objective, call style, opening approach,
   closing CTA, availability/booking rules, business hours, additional context
 
 **STEP 3 — REVIEW & CONFIRM:**
@@ -364,6 +364,7 @@ Required (MUST ask if missing):
 - objective: "What's the main goal? Book a demo? Schedule a meeting? Qualify the lead?"
 
 Optional (ask if time permits, suggest defaults):
+- language_override: "What language should the calling agent use with leads? I can default to the website language, but you can override it."
 - call_style: "How should the agent sound? Professional, friendly, consultative?" (default: professional)
 - closing_cta: "What should the closing ask be?" (default: "Can we schedule 15 minutes this week?")
 - pricing_info: "Any specific pricing or offers to mention?" (skip if found on website)
@@ -375,13 +376,13 @@ Keep responses to 1-2 SHORT sentences. This is a phone call, not an email.
 
 STEP 3 — SAVE CONFIG:
 Once you have enough information, call configure_voice_agent with the gathered structured fields.
-Confirm back: "Perfect, I've saved your campaign settings. Next, you'll choose which leads should get their own calling agents."
+Confirm back: "Perfect, I've saved your campaign settings. Next, you'll create the campaign calling agent and then choose which leads to call."
 
 STEP 4 — HAND OFF TO NEXT STEP:
 Do NOT create lead agents here.
-Instead, tell the user that the next step in the UI is to select leads, and then the system will create one agent per selected lead using this saved config.
+Instead, tell the user that the next step in the UI is to create the reusable campaign agent, and after that they can select leads for calls using runtime personalization.
 
-Report: "Done! Your campaign voice configuration is saved. The next step is to select leads for agent creation."
+Report: "Done! Your campaign voice configuration is saved. The next step is to create the campaign agent, then select leads for calling."
 
 STEP 5 — TEST OR ADJUST:
 If user wants to adjust the agent config, gather the changes and update.

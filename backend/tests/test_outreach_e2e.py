@@ -561,7 +561,28 @@ class TestAgentCreationWithKB:
 
         assert result["status"] == "success"
         assert result["created_count"] == 1
-        assert result["created_agents"][0]["lead_name"] == "Restaurant Caru"
+        assert result["created_agents"][0]["name"].startswith("Campaign SDR for ")
+        assert result["mode"] == "created"
+        assert len(pipeline_state["elevenlabs_agents"]) == 1
+        agent = pipeline_state["elevenlabs_agents"][0]
+        assert agent["dynamic_variables"]["agent_role"] == "campaign_outbound"
+
+    def test_create_campaign_calling_agents_updates_existing_campaign_agent(self, populated_pipeline):
+        os.environ["ELEVENLABS_API_KEY"] = ""
+        configure_voice_agent(json.dumps({
+            "caller_name": "Ana",
+            "objective": "book_demo",
+            "call_style": "consultative",
+        }))
+
+        first = create_campaign_calling_agents()
+        second = create_campaign_calling_agents()
+
+        assert first["status"] == "success"
+        assert second["status"] == "success"
+        assert second["mode"] == "updated"
+        assert len(pipeline_state["elevenlabs_agents"]) == 1
+        assert first["campaign_agent_id"] == second["campaign_agent_id"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -587,9 +608,71 @@ class TestAPIEndpoints:
         resp = self.client.post("/api/call", json={
             "agent_id": "agent_test",
             "phone_number": "+40721234567",
+            "dynamic_variables": {"lead_name": "Restaurant Caru"},
         })
         # Should succeed (mock mode, no API keys)
         assert resp.status_code == 200
+
+    @patch("agents.tools.make_outbound_call")
+    def test_call_endpoint_passes_dynamic_variables(self, mock_make_call):
+        mock_make_call.return_value = {"status": "success"}
+        resp = self.client.post("/api/call", json={
+            "agent_id": "agent_test",
+            "phone_number": "+40721234567",
+            "dynamic_variables": {"lead_name": "Restaurant Caru", "contact_person": "Ion"},
+        })
+        assert resp.status_code == 200
+        args = mock_make_call.call_args[0]
+        assert args[0] == "agent_test"
+        assert args[1] == "+40721234567"
+        assert json.loads(args[2])["contact_person"] == "Ion"
+
+    @patch("server.asyncio.create_task", lambda coro: coro.close())
+    @patch("server.get_campaign_state")
+    @patch("server.verify_campaign_ownership", return_value=True)
+    def test_batch_call_uses_single_campaign_agent_with_per_call_vars(self, _mock_verify, mock_get_state):
+        mock_get_state.return_value = {
+            "business_analysis": {
+                "business_name": "Ice Trust",
+                "services": ["Ice delivery", "Cold storage"],
+            },
+            "preferences": {
+                "objective": "book_demo",
+                "call_style": "professional",
+                "voice_config": {"objective": "book_demo", "call_style": "professional"},
+            },
+            "judged_pitches": [
+                {
+                    "lead_name": "Restaurant Caru cu Bere",
+                    "contact_person": "Ion Popescu",
+                    "phone_number": "+40721234567",
+                    "pitch_script": "Pitch one",
+                },
+                {
+                    "lead_name": "Hotel Intercontinental",
+                    "contact_person": "Maria Ionescu",
+                    "phone_number": "+40722345678",
+                    "pitch_script": "Pitch two",
+                },
+            ],
+            "elevenlabs_agents": [
+                {
+                    "agent_id": "campaign_agent_1",
+                    "name": "Campaign SDR for Ice Trust",
+                    "dynamic_variables": {"agent_role": "campaign_outbound"},
+                }
+            ],
+        }
+
+        resp = self.client.post("/api/campaigns/1/batch-call", json={
+            "lead_names": ["Hotel Intercontinental"],
+            "delay_seconds": 30,
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_calls"] == 1
+        assert data["calls"][0]["agent_id"] == "campaign_agent_1"
+        assert data["calls"][0]["dynamic_variables"]["lead_name"] == "Hotel Intercontinental"
 
     def test_twilio_webhook_no_agent(self):
         resp = self.client.post("/twilio/outbound")

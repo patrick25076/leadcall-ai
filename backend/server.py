@@ -236,6 +236,7 @@ class ChatRequest(BaseModel):
 class CallRequest(BaseModel):
     agent_id: str = Field(..., max_length=200)
     phone_number: str = Field(..., max_length=20)
+    dynamic_variables: dict = Field(default_factory=dict)
 
 
 class CreateVoiceAgentsRequest(BaseModel):
@@ -629,7 +630,11 @@ async def initiate_call(req: CallRequest):
         raise HTTPException(status_code=400, detail="Invalid phone number format. Must be E.164 (e.g., +40712345678).")
 
     from agents.tools import make_outbound_call
-    result = make_outbound_call(req.agent_id, req.phone_number)
+    result = make_outbound_call(
+        req.agent_id,
+        req.phone_number,
+        json.dumps(req.dynamic_variables or {}),
+    )
     return result
 
 
@@ -819,9 +824,27 @@ async def batch_call(campaign_id: int, request: Request):
     if not agents_list:
         raise HTTPException(status_code=400, detail="No voice agents created. Set up voice agents first.")
 
-    # Match leads to agents by name
+    # Match leads to a single campaign agent and inject lead context per call
     judged = state.get("judged_pitches", [])
-    scored = state.get("scored_leads", [])
+    analysis = state.get("business_analysis") or {}
+    prefs = state.get("preferences") or {}
+    voice_cfg = prefs.get("voice_config", {}) or {}
+    business_name = str(analysis.get("business_name") or "our company")
+    services_summary = ", ".join(analysis.get("services", [])[:6]) or "our services"
+    objective = str(voice_cfg.get("objective") or prefs.get("objective") or "").strip()
+    call_style = str(voice_cfg.get("call_style") or prefs.get("call_style") or "professional").strip()
+
+    campaign_agent = None
+    for agent in agents_list:
+        vars_map = agent.get("dynamic_variables", {}) or {}
+        if vars_map.get("agent_role") == "campaign_outbound":
+            campaign_agent = agent
+            break
+        if str(agent.get("name", "")).startswith("Campaign SDR for "):
+            campaign_agent = agent
+            break
+    if campaign_agent is None:
+        campaign_agent = agents_list[0]
 
     batch_id = f"batch_{campaign_id}_{uuid.uuid4().hex[:8]}"
     calls_queued = []
@@ -837,19 +860,23 @@ async def batch_call(campaign_id: int, request: Request):
         if lead_ids and idx not in lead_ids:
             continue
 
-        # Find matching agent
-        agent = None
-        for a in agents_list:
-            if lead_name.lower() in (a.get("name", "") or "").lower():
-                agent = a
-                break
-        if not agent:
-            agent = agents_list[0]  # Use first agent as fallback
+        dynamic_variables = {
+            "lead_name": lead_name,
+            "lead_company": lead_name,
+            "lead_industry": str(pitch.get("industry") or pitch.get("lead_industry") or "").strip(),
+            "contact_person": str(pitch.get("contact_person") or lead_name or "there").strip(),
+            "pitch_script": str(pitch.get("revised_pitch") or pitch.get("pitch_script") or pitch.get("pitch") or "").strip(),
+            "your_company": business_name,
+            "your_services": services_summary,
+            "call_objective": objective,
+            "call_style": call_style,
+        }
 
         calls_queued.append({
             "lead_name": lead_name,
             "phone_number": phone,
-            "agent_id": agent.get("agent_id", ""),
+            "agent_id": campaign_agent.get("agent_id", ""),
+            "dynamic_variables": dynamic_variables,
         })
 
     # Run calls in background with delay
@@ -859,7 +886,11 @@ async def batch_call(campaign_id: int, request: Request):
             if i > 0:
                 await asyncio.sleep(delay_seconds)
             try:
-                make_outbound_call(call["agent_id"], call["phone_number"])
+                make_outbound_call(
+                    call["agent_id"],
+                    call["phone_number"],
+                    json.dumps(call.get("dynamic_variables", {})),
+                )
                 logger.info("Batch call %d/%d: %s", i + 1, len(calls_queued), call["lead_name"])
             except Exception as e:
                 logger.error("Batch call failed for %s: %s", call["lead_name"], e)
