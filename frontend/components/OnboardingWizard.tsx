@@ -7,6 +7,7 @@ import { apiFetch } from "@/lib/api";
 type Step = "auth" | "website" | "email" | "phone" | "done";
 
 interface OnboardingWizardProps {
+  initialUser?: { id: string; email: string } | null;
   onComplete: (config: OnboardingConfig) => void;
   onHasCampaigns?: () => void;
 }
@@ -20,9 +21,9 @@ export interface OnboardingConfig {
   sessionId?: string;
 }
 
-export default function OnboardingWizard({ onComplete, onHasCampaigns }: OnboardingWizardProps) {
-  const [step, setStep] = useState<Step>("auth");
-  const [user, setUser] = useState<{ id: string; email: string } | null>(null);
+export default function OnboardingWizard({ initialUser, onComplete, onHasCampaigns }: OnboardingWizardProps) {
+  const [step, setStep] = useState<Step>(initialUser ? "website" : "auth");
+  const [user, setUser] = useState<{ id: string; email: string } | null>(initialUser || null);
 
   // Website step
   const [websiteUrl, setWebsiteUrl] = useState("");
@@ -44,14 +45,33 @@ export default function OnboardingWizard({ onComplete, onHasCampaigns }: Onboard
   const [analysisSessionId, setAnalysisSessionId] = useState("");
   const [analysisComplete, setAnalysisComplete] = useState(false);
 
-  // Check for existing session on mount
+  // If initialUser prop changes (e.g., page.tsx detected login), sync state
   useEffect(() => {
-    async function handleAuth(session: { user: { id: string; email?: string }; access_token: string }) {
-      setUser({ id: session.user.id, email: session.user.email || "" });
-      // If caller provided onHasCampaigns, check if user already has campaigns
+    if (initialUser && !user && step === "auth") {
+      setUser(initialUser);
+      setStep("website");
+    }
+  }, [initialUser, user, step]);
+
+  // Listen for fresh sign-ins only (user logging in from this wizard)
+  // page.tsx handles initial session routing — we only handle SIGNED_IN here
+  useEffect(() => {
+    if (initialUser) return; // Already authenticated, no need to listen
+
+    let mounted = true;
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (!mounted) return;
+      if (event !== "SIGNED_IN" || !session?.user) return;
+
+      const authedUser = { id: session.user.id, email: session.user.email || "" };
+      setUser(authedUser);
+
+      // Check if returning user has existing campaigns
       if (onHasCampaigns) {
         try {
           const resp = await apiFetch("/api/campaigns");
+          if (!mounted) return;
           if (resp.ok) {
             const data = await resp.json();
             const campaigns = data.campaigns || data || [];
@@ -60,25 +80,17 @@ export default function OnboardingWizard({ onComplete, onHasCampaigns }: Onboard
               return;
             }
           }
-        } catch { /* fall through to onboarding */ }
+        } catch { /* fall through to website step */ }
       }
-      setStep("website");
-    }
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        handleAuth(session);
-      }
+      if (mounted) setStep("website");
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) {
-        handleAuth(session);
-      }
-    });
-
-    return () => subscription.unsubscribe();
-  }, [onHasCampaigns]);
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
+  }, [initialUser, onHasCampaigns]);
 
   // Sign up / Login with Google
   const handleGoogleAuth = async () => {

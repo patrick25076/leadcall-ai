@@ -14,13 +14,19 @@ type View = "loading" | "onboarding" | "campaigns" | "dashboard";
 export default function Home() {
   const [view, setView] = useState<View>("loading");
   const [activeCampaignId, setActiveCampaignId] = useState<number | null>(null);
+  const [user, setUser] = useState<{ id: string; email: string } | null>(null);
   const viewRef = useRef<View>("loading");
 
   // Keep ref in sync so the auth listener can read current view
   useEffect(() => { viewRef.current = view; }, [view]);
 
   useEffect(() => {
+    let mounted = true;
+    let checkingCampaigns = false;
+
     async function checkCampaigns(): Promise<boolean> {
+      if (checkingCampaigns) return false;
+      checkingCampaigns = true;
       try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 8000);
@@ -30,45 +36,63 @@ export default function Home() {
           const data = await resp.json();
           const campaigns = data.campaigns || data || [];
           if (Array.isArray(campaigns) && campaigns.length > 0) {
-            setView("campaigns");
+            if (mounted) setView("campaigns");
             return true;
           }
         }
       } catch { /* timeout or network error — fall through */ }
+      finally { checkingCampaigns = false; }
       return false;
     }
 
-    // Initial session check
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
-      if (session?.user) {
-        const hasCampaigns = await checkCampaigns();
-        if (!hasCampaigns) setView("onboarding");
-      } else {
-        setView("onboarding");
-      }
-    }).catch(() => {
-      setView("onboarding");
-    });
-
-    // Failsafe: if still loading after 10s, go to onboarding
-    const failsafe = setTimeout(() => {
-      if (viewRef.current === "loading") setView("onboarding");
-    }, 10000);
-
-    // Listen for auth state changes (handles OAuth redirects, token refresh, delayed session restore)
-    // Only act when user is still on loading/onboarding — don't disrupt dashboard/campaigns views
+    // Single auth handler — use onAuthStateChange exclusively (fires INITIAL_SESSION on subscribe)
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (_event, session) => {
-        const current = viewRef.current;
-        if (current !== "loading" && current !== "onboarding") return;
-        if (session?.user) {
-          const hasCampaigns = await checkCampaigns();
-          if (!hasCampaigns) setView("onboarding");
+      async (event, session) => {
+        if (!mounted) return;
+
+        // Sign-out: always reset
+        if (event === "SIGNED_OUT") {
+          setUser(null);
+          setView("onboarding");
+          setActiveCampaignId(null);
+          return;
+        }
+
+        // Token refresh: session still valid, don't change views
+        if (event === "TOKEN_REFRESHED") return;
+
+        // Initial session: first load or OAuth redirect — this is the only initial routing
+        if (event === "INITIAL_SESSION") {
+          if (session?.user) {
+            setUser({ id: session.user.id, email: session.user.email || "" });
+            const hasCampaigns = await checkCampaigns();
+            if (mounted && !hasCampaigns) setView("onboarding");
+          } else {
+            setView("onboarding");
+          }
+          return;
+        }
+
+        // SIGNED_IN: user just logged in (from OnboardingWizard)
+        // Update user state but let OnboardingWizard handle post-login routing
+        if (event === "SIGNED_IN" && session?.user) {
+          setUser({ id: session.user.id, email: session.user.email || "" });
+          // Only check campaigns if somehow still on loading screen
+          if (viewRef.current === "loading") {
+            const hasCampaigns = await checkCampaigns();
+            if (mounted && !hasCampaigns) setView("onboarding");
+          }
         }
       }
     );
 
+    // Failsafe: if still loading after 5s, go to onboarding
+    const failsafe = setTimeout(() => {
+      if (mounted && viewRef.current === "loading") setView("onboarding");
+    }, 5000);
+
     return () => {
+      mounted = false;
       subscription.unsubscribe();
       clearTimeout(failsafe);
     };
@@ -89,8 +113,7 @@ export default function Home() {
   const handleLogout = async () => {
     await supabase.auth.signOut();
     localStorage.clear();
-    setView("onboarding");
-    setActiveCampaignId(null);
+    // SIGNED_OUT event handler will reset view and user state
   };
 
   const handleSelectCampaign = (id: number) => {
@@ -123,6 +146,7 @@ export default function Home() {
   if (view === "onboarding") {
     return (
       <OnboardingWizard
+        initialUser={user}
         onComplete={handleOnboardingComplete}
         onHasCampaigns={handleHasCampaigns}
       />
